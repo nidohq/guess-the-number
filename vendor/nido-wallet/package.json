@@ -8,6 +8,6 @@
   },
   "peerDependencies": {
     "@creit.tech/stellar-wallets-kit": "^2.5.0",
-    "@stellar/stellar-sdk": "^16.1.0"
+    "@stellar/stellar-sdk": "^17.2.1"
   }
 }
