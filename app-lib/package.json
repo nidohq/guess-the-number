@@ -11,6 +11,6 @@
   "dependencies": {
     "@creit.tech/stellar-wallets-kit": "^2.5.0",
     "@nidohq/stellar-wallets-kit-module": "0.1.1-spike",
-    "@stellar/stellar-sdk": "^16.4.0"
+    "@stellar/stellar-sdk": "^17.2.1"
   }
 }
