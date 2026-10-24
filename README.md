@@ -12,15 +12,11 @@ takes one device passkey prompt and no Nido page. A wrong guess costs 1 XLM, so
 two go through and the account refuses the third before anything is sent.
 Testnet only.
 
-> **For now this build talks to Nido's preview of
-> [nidohq/nido#318](https://github.com/nidohq/nido/pull/318),
-> `https://318.test.nido.fyi`, not `https://test.nido.fyi`.** The approval this
-> app asks for (both rules in one request, an app passkey as the signer) is in
-> that pull request. The Pages workflow sets
-> `PUBLIC_NIDO_BASE=https://318.test.nido.fyi`; delete that line once the pull
-> request merges and test.nido.fyi serves it. Create your Nido account from the
-> app's connect popup: an account made on test.nido.fyi does not open on the
-> preview, because a Nido passkey belongs to its account's own host.
+> Until 2026-10-24 the site used Nido's preview of
+> [nidohq/nido#318](https://github.com/nidohq/nido/pull/318); it now uses
+> https://test.nido.fyi. A Nido account made on the preview does not open on
+> test.nido.fyi (a Nido passkey belongs to its account's own host), so create a
+> new one from the app's connect popup.
 
 ## How it was made
 
@@ -58,7 +54,7 @@ commit after it carries everything this example changes:
   the build copies `index.html` to `404.html` so a refresh on `/debug` still
   loads the app, and
   [`.github/workflows/pages.yml`](.github/workflows/pages.yml) builds and
-  deploys on every push to `main`, pointed at the Nido preview above.
+  deploys on every push to `main`.
 
 The first two commits are the same example made from template `1d01f65`, before
 the app passkey. The contract is the shared testnet sample deployment pinned
@@ -72,7 +68,6 @@ You need Node 22.12+, Rust with the `wasm32v1-none` target and the
 
 ```sh
 cp .env.example .env
-echo PUBLIC_NIDO_BASE=https://318.test.nido.fyi > app/.env   # until nido#318 merges
 npm run tools:scaffold && npm ci && npm run doctor
 npm run clients:testnet && npm run dev    # http://localhost:5542
 ```
@@ -98,9 +93,8 @@ guess.
 The repository's Pages source is "GitHub Actions". The workflow runs the quick
 start above on a fresh runner (its `testnet-user` key is a throwaway that
 Friendbot funds in that job), then lint, format check and unit tests, then
-`npm run build` with `BASE_PATH` from `actions/configure-pages` and
-`PUBLIC_NIDO_BASE` set to the preview, and deploys `app/dist` with
-`actions/deploy-pages`.
+`npm run build` with `BASE_PATH` from `actions/configure-pages`, and deploys
+`app/dist` with `actions/deploy-pages`.
 
 Nido needs no configuration for a new origin. Its connect, signing and grant
 pages accept any `https` app origin (plain `http` only on loopback) as long as

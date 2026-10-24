@@ -51,11 +51,6 @@ jobs:
         env:
           # "/guess-the-number" on nidohq.github.io; "" behind a custom domain
           BASE_PATH: ${{ steps.pages.outputs.base_path }}/
-          # TEMPORARY: the one-popup approval this app asks for is in Nido's
-          # PR preview (https://github.com/nidohq/nido/pull/318). Delete this
-          # line when that PR merges and test.nido.fyi serves it; unset, the
-          # app uses https://test.nido.fyi.
-          PUBLIC_NIDO_BASE: https://318.test.nido.fyi
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: app/dist
