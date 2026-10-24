@@ -1,0 +1,343 @@
+import {
+	KitEventType,
+	type Networks,
+	StellarWalletsKit,
+} from "@creit.tech/stellar-wallets-kit"
+import { defaultModules } from "@creit.tech/stellar-wallets-kit/modules/utils"
+import { Asset, Keypair, rpc, xdr, type contract } from "@stellar/stellar-sdk"
+import {
+	ACCOUNT_SWITCH_REQUESTED,
+	NIDO_ID,
+	reserveCeremonyPopup,
+} from "@nidohq/stellar-wallets-kit-module"
+import {
+	NIDO_BASE,
+	createNidoModules,
+	isSmartAccount,
+	smartAccountBalance,
+	submitSmartAccount,
+	transactionSource,
+} from "./nido"
+import { allowHttp, networkPassphrase, rpcUrl, stellarNetwork } from "./env"
+import { getFriendbotUrl } from "./friendbot"
+import {
+	activeSession,
+	checkSession,
+	requestSession,
+	resumeSession,
+	submitWithSession,
+	type Grant,
+} from "./session"
+
+/**
+ * Ask the owner of a Nido account to let this app act within `grants`: one
+ * passkey approval per grant, on Nido's own pages, then back to this page.
+ * Call from a click handler; the page navigates away. Pass only the grants
+ * still to approve (`sessionStatus(...).ask`); the app's key is reused.
+ */
+export const requestAppSession = (account: string, grants: Grant[]) =>
+	requestSession({
+		account,
+		grants,
+		base: nidoBase,
+		friendbotUrl: getFriendbotUrl,
+	})
+
+/** Record Nido's answer to a grant request; call once on page load. */
+export const resumeAppSession = () =>
+	resumeSession({ base: nidoBase, server, networkPassphrase })
+
+/** Read the account's rules to see which pending grants actually landed. */
+export const checkAppSession = (account: string) =>
+	checkSession(account, server, networkPassphrase)
+
+// These wallets work on Local and Futurenet while the rest enforce or fail on
+// any networks beside Testnet and Mainnet. Filter below based on dApp config.
+const CUSTOM_NETWORK_WALLETS = new Set(["freighter", "xbull", "hana"])
+
+/** The native XLM token's contract (its Stellar Asset Contract) on this network. */
+export const xlmTokenId = Asset.native().contractId(networkPassphrase)
+
+/** The Nido deployment this app connects to (`PUBLIC_NIDO_BASE`). */
+export const nidoBase: string = import.meta.env.PUBLIC_NIDO_BASE || NIDO_BASE
+
+StellarWalletsKit.init({
+	network: networkPassphrase as Networks,
+	modules: [
+		...createNidoModules(networkPassphrase, nidoBase),
+		...(stellarNetwork === "LOCAL" || stellarNetwork === "FUTURENET"
+			? defaultModules({
+					filterBy: (m) => CUSTOM_NETWORK_WALLETS.has(m.productId),
+				})
+			: defaultModules()),
+	],
+})
+
+/** Open the built-in wallet-selection modal; resolves once a wallet is connected. */
+export const connectWallet = () => StellarWalletsKit.authModal()
+
+/** Open the built-in profile modal (shows the connected account + disconnect). */
+export const profileModal = () => StellarWalletsKit.profileModal()
+
+/** Disconnect the active wallet. The kit clears its own persisted state. */
+export const disconnectWallet = () => StellarWalletsKit.disconnect()
+
+/** Sign a transaction with the active wallet. Passed to generated contract clients. */
+export const signTransaction: typeof StellarWalletsKit.signTransaction = async (
+	tx,
+	opts,
+) => {
+	try {
+		return await StellarWalletsKit.signTransaction(tx, opts)
+	} catch (error) {
+		if (error instanceof Error && error.name === ACCOUNT_SWITCH_REQUESTED) {
+			await disconnectWallet()
+			throw new Error(
+				"Connect again to choose another account, then rebuild and retry the transaction.",
+			)
+		}
+		throw error
+	}
+}
+
+/**
+ * Nido signs in a popup, and browsers allow popups only during a user
+ * gesture. Building a contract call simulates it over RPC first, which loses
+ * the gesture, so the popup is blocked. Call this synchronously at the top of
+ * the click/submit handler, before any `await`, and call the returned function
+ * in a `finally`. A no-op for every other wallet, and when an approved
+ * session key will sign instead.
+ */
+export function reserveSigningPopup(address: string | undefined): () => void {
+	if (
+		!address ||
+		!isSmartAccount(address) ||
+		activeSession(address) ||
+		StellarWalletsKit.selectedModule?.productId !== NIDO_ID
+	)
+		return () => {}
+	return reserveCeremonyPopup()
+}
+
+/**
+ * Submit a generated-client call for the connected account and resolve with
+ * the confirmed result and its transaction hash.
+ *
+ * - G-address: the wallet signs, the SDK sends (`signAndSend`).
+ * - C-address with an approved session (see `session.ts`): this app's
+ *   session key signs under the account's rules, no prompt.
+ * - C-address without one: Nido's popup. Its passkey signs under the
+ *   account's admin rule, which only covers calls on the account itself, so
+ *   a call into another contract is refused; request a session for those.
+ */
+export async function submitContract<T>(
+	tx: contract.AssembledTransaction<T>,
+	address: string,
+): Promise<{ result: T; hash: string }> {
+	if (!isSmartAccount(address)) {
+		const sent = await tx.signAndSend({ signTransaction })
+		const hash = sent.sendTransactionResponse?.hash
+		if (!hash) throw new Error("The wallet sent no transaction")
+		return { result: sent.result, hash }
+	}
+	const session = activeSession(address)
+	if (session) return submitWithSession(tx, session, server, networkPassphrase)
+	if (StellarWalletsKit.selectedModule.productId !== NIDO_ID) {
+		throw new Error("This smart-account submission flow requires Nido")
+	}
+	return submitSmartAccount(tx, address, signTransaction, server)
+}
+
+/**
+ * Build and submit one contract call for `address`, the whole call site in
+ * one step: reserves Nido's popup, builds the call with a transaction source
+ * a C-address can use, submits it, and releases the popup. Call it before any
+ * other `await` in the click handler, so the popup keeps the user's gesture:
+ *
+ *     const { result, hash } = await submitCall(address, (publicKey) =>
+ *         myContract.my_fn({ user: address }, { publicKey }))
+ */
+export async function submitCall<T>(
+	address: string,
+	build: (
+		publicKey: string | undefined,
+	) => Promise<contract.AssembledTransaction<T>>,
+): Promise<{ result: T; hash: string }> {
+	const release = reserveSigningPopup(address)
+	try {
+		return await submitContract(
+			await build(transactionSource(address)),
+			address,
+		)
+	} finally {
+		release()
+	}
+}
+
+/**
+ * Use the wallet's reported network if it supports it, otherwise flag the
+ * wallet as unsupported. Note that even if a wallet is `unsupported`, this
+ * only means it does not support the `getNetwork` function. It *may* still
+ * support passing `networkPassphrase` to `signTransaction`. For the wallets
+ * that do not support the `networkPassphrase` argument to `signTransaction`,
+ * you can fall back to error parsing to determine if `signTransaction`
+ * failures were due to network mismatch.
+ */
+export const getWalletNetwork = async (): Promise<{
+	supported: boolean
+	networkPassphrase?: string
+}> => {
+	try {
+		const { networkPassphrase } = await StellarWalletsKit.getNetwork()
+		return { supported: true, networkPassphrase }
+	} catch {
+		return { supported: false }
+	}
+}
+
+/**
+ * Watch the network the wallet itself reports. Extensions emit no event when
+ * the user switches networks, so this polls `getNetwork` — the only available
+ * signal. The callback fires immediately with the current passphrase
+ * (`undefined` when the wallet can't report one) and again on every change.
+ *
+ * Returns a cleanup function that stops polling. Only used in `onWalletChange`
+ */
+const onWalletNetworkChange = (
+	cb: (networkPassphrase: string | undefined) => void,
+	pollInterval = 3000,
+): (() => void) => {
+	let last: string | undefined
+	let first = true
+	let timeoutId: ReturnType<typeof setTimeout> | null = null
+	let stopped = false
+
+	const poll = async () => {
+		const { networkPassphrase } = await getWalletNetwork()
+		if (stopped) return
+		if (first || networkPassphrase !== last) {
+			first = false
+			last = networkPassphrase
+			cb(networkPassphrase)
+		}
+		timeoutId = setTimeout(() => void poll(), pollInterval)
+	}
+	void poll()
+
+	return () => {
+		stopped = true
+		if (timeoutId != null) clearTimeout(timeoutId)
+	}
+}
+
+export interface WalletState {
+	address: string | undefined
+	networkPassphrase: string | undefined
+}
+
+/**
+ * Subscribe to full wallet state: connected address and network. Fires
+ * immediately with the current state on subscribe (covering reload restore)
+ * and on every subsequent change: connect, disconnect, or the wallet
+ * switching networks (detected via polling, see `onWalletNetworkChange`).
+ *
+ * Returns an framework-agnostic unsubscribe function.
+ */
+export const onWalletChange = (
+	cb: (state: WalletState) => void,
+): (() => void) => {
+	let stopPoll: (() => void) | undefined
+
+	const stopState = StellarWalletsKit.on(
+		KitEventType.STATE_UPDATED,
+		(event) => {
+			stopPoll?.()
+			stopPoll = undefined
+			// NOTE: `event.networkPassphrase` is the app's configured network, not
+			// the wallet's connected network. Disregard it and start our own polling
+			// logic below if we have an address.
+			const { address } = event.payload
+			if (address) {
+				stopPoll = onWalletNetworkChange((networkPassphrase) =>
+					cb({ address, networkPassphrase }),
+				)
+			} else {
+				cb({ address: undefined, networkPassphrase: undefined })
+			}
+		},
+	)
+
+	const stopDisconnect = StellarWalletsKit.on(KitEventType.DISCONNECT, () => {
+		stopPoll?.()
+		stopPoll = undefined
+		cb({ address: undefined, networkPassphrase: undefined })
+	})
+
+	return () => {
+		stopState()
+		stopDisconnect()
+		stopPoll?.()
+	}
+}
+
+// Server is configured from the generated clients' options, which don't change at runtime
+const server = new rpc.Server(rpcUrl, { allowHttp })
+
+const formatter = new Intl.NumberFormat()
+
+/** One stroop is 10^-7 XLM. */
+const STROOPS_PER_XLM = 10_000_000n
+
+/**
+ * Format a stroop amount as XLM. Splits the integer and fractional parts in
+ * bigint so large balances don't lose stroops before formatting.
+ */
+const formatStroops = (stroops: bigint): string => {
+	const whole = stroops / STROOPS_PER_XLM
+	const fraction = (stroops % STROOPS_PER_XLM).toString().padStart(7, "0")
+	return formatter.format(Number(`${whole}.${fraction}`))
+}
+
+/**
+ * Balances keyed by asset. Only native XLM (`xlm`) is fetched: RPC reads
+ * ledger entries by key and can't list an account's trustlines.
+ */
+export type MappedBalances = { xlm?: { balance: string } }
+
+/**
+ * Fetch the account's native XLM balance over RPC. An unfunded account has no
+ * ledger entry, so it resolves to `{}` and consumers see no `xlm` key. RPC
+ * failures are logged and also resolve to `{}`.
+ */
+export const fetchBalances = async (
+	address: string,
+): Promise<MappedBalances> => {
+	try {
+		if (isSmartAccount(address)) {
+			return {
+				xlm: {
+					balance: formatStroops(
+						await smartAccountBalance(address, server, networkPassphrase),
+					),
+				},
+			}
+		}
+		const key = xdr.LedgerKey.account(
+			new xdr.LedgerKeyAccount({
+				accountId: Keypair.fromPublicKey(address).xdrPublicKey(),
+			}),
+		)
+		// `getLedgerEntries` rather than `getAccountEntry`, which reports every
+		// failure (including RPC outages) as "Account not found"
+		const { entries } = await server.getLedgerEntries(key)
+		const account = entries[0]?.val.account()
+		if (!account) return {}
+		return { xlm: { balance: formatStroops(account.balance().toBigInt()) } }
+	} catch (err) {
+		console.error(err)
+		return {}
+	}
+}
+
+// The kit itself, for templates that need `on(...)` subscriptions or `setWallet`.
+export const wallet = StellarWalletsKit

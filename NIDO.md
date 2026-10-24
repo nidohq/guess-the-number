@@ -1,0 +1,347 @@
+# Nido React template
+
+A Scaffold Stellar React app with Nido passkey smart accounts in the wallet
+picker, and the session keys a smart account needs to use your contracts. This
+is the guide for people. Coding agents read [`AGENTS.md`](AGENTS.md), which
+states the same rules in fewer words.
+
+Everything runs on testnet: hosted Nido is testnet-only. Use throwaway testnet
+keys only, never mainnet or a key a person holds.
+
+## Quick start
+
+You need Node 22.12+, Rust with the `wasm32v1-none` target
+(`rustup target add wasm32v1-none`), and the
+[Stellar CLI](https://developers.stellar.org/docs/tools/cli/install-cli). The
+project installs its own Scaffold.
+
+Start your own app from GitHub (in an app you already have, start at
+`npm run tools:scaffold`):
+
+```sh
+stellar scaffold init --template nidohq/scaffold-template my-app
+cd my-app
+npm run tools:scaffold     # stellar-scaffold for this project, in .tools/ (seconds)
+npm ci                     # npm 11 prints allow-scripts warnings; they are harmless
+npm run doctor             # tools, testnet, keys and clients, with fixes
+npm run clients:testnet    # client for the shared Guess the Number deployment
+npm run dev                # the URL it prints
+```
+
+From a checkout of the template, `new-app` does the same with your local
+changes, and `--blank` swaps the sample for a one-function starter contract:
+
+```sh
+npm run new-app -- ../my-app --blank
+cd ../my-app
+npm run tools:scaffold && npm ci && npm run doctor
+npm run deploy:testnet     # deploys contracts/check-in, pins its ID, writes its client
+npm run dev                # on the app's own port
+```
+
+Without `--blank`, the copy keeps the Guess the Number sample; run
+`npm run clients:testnet` instead of `deploy:testnet` to use its shared
+deployment. To try the sample in the checkout itself, run the same commands from
+`tools:scaffold` on, after `cp .env.example .env`.
+
+Then open the app, press Connect and choose Nido. Without a Nido account yet,
+create one at https://test.nido.fyi: one passkey, and it arrives with 5 test
+XLM. Back in the app, approve the session (one passkey confirmation per grant),
+and each call after that goes through without a prompt.
+
+In the sample, each wrong guess sends 1 XLM to the game. The session you approve
+lets the game's key call `guess` and spend up to 2 XLM a day from your account,
+so two wrong guesses go through without a prompt and your account refuses the
+third before anything is sent. The app says so and the guess costs nothing.
+
+`new-app` gives the copy its own package name, page title, deployer identity
+(`<name>-deployer`) and dev-server port, so several apps on one machine don't
+collide. Pass `--name` when the folder name isn't the app name.
+
+### What each command touches
+
+| Command                   | Does                                                                                                                                         | Deploys  | Spends or writes keys                                               |
+| ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- | -------- | ------------------------------------------------------------------- |
+| `npm run tools:scaffold`  | Downloads the tested `stellar-scaffold` into `.tools/bin`                                                                                    | No       | No                                                                  |
+| `npm run doctor`          | Checks tools, `.env`, pins, clients, deployer, testnet RPC, Nido, the port; `-- --json` for scripts                                          | No       | No (reads only)                                                     |
+| `npm run clients:testnet` | Compiles the contracts and writes clients for the IDs under `testnet:` in `scaffold.yml`                                                     | No       | Creates the deployer key and has Friendbot fund it, on first run    |
+| `npm run deploy:testnet`  | Compiles, deploys new or changed contracts (network `testnet-dev`), runs `after-deploy` calls, pins the IDs under `testnet:`, writes clients | Yes      | The deployer pays the fees (Friendbot XLM); creates it on first run |
+| `npm run dev`             | `stellar scaffold watch` for the network in `.env`, plus Vite on `PORT`                                                                      | No       | Creates the deployer on first run                                   |
+| `npm run test-browser`    | A throwaway Chrome with virtual passkeys, for automating a real Nido account                                                                 | No       | Saves throwaway passkeys in `target/`                               |
+| `npm run stellar -- …`    | The `stellar` CLI with this project's tools and keys, e.g. `npm run stellar -- keys ls`                                                      | If asked | If asked                                                            |
+
+Keys and contract aliases live in `.stellar-config/` (gitignored), not in your
+global `~/.config/stellar`. The deployer is a throwaway testnet key; nothing
+else holds it.
+
+## Your own contract in five steps
+
+1. **Write it.** A crate in `contracts/<name>` with `crate-type = ["cdylib"]`
+   (or grow the `--blank` starter, `contracts/check-in`). In each function a
+   user calls, `user.require_auth()` comes first.
+2. **Find its grants.** A Nido account approves one grant per contract it
+   authorizes in a call: the root call, plus every sub-call that needs the same
+   account, such as a token `transfer` from the user. Assert `env.auths()` in a
+   unit test: the contracts in that list are your grants
+   (`contracts/check-in/src/test.rs` does this).
+3. **List it in `scaffold.yml`** under `contracts:`, with `local` and
+   `testnet-dev` entries: `type: workspace`, `source: <package name>`, and the
+   constructor `args`.
+4. **Deploy it:** `npm run deploy:testnet`. It deploys to testnet, pins the new
+   ID under `testnet:` (the network `npm run dev` uses), and writes the client,
+   a camelCase export of `@stellar-scaffold/app-lib/clients`. A redeploy gets a
+   new ID; sessions approved for the old one no longer cover it, and the app
+   asks again.
+5. **Call it from React** with the pattern below, inside a `SessionGate` that
+   asks for the grants from step 2.
+
+Build contracts through Scaffold. A plain `stellar contract build` compiles for
+the local network, and `stellar_registry::import_asset!("xlm")` bakes that
+network's XLM contract in at compile time: deployed to testnet, it fails with
+`Error(Context, InvalidAction)`. To recover, run
+`cargo clean -p <crate> --target wasm32v1-none --release` and deploy again.
+
+## Calling a contract from React
+
+```tsx
+// One grant per contract the call authorizes for the user
+const grants: Grant[] = [
+	{
+		target: myContract.options.contractId,
+		functions: ["my_fn"],
+		duration: "24h",
+		label: "my-app",
+	},
+]
+
+export const MyAction = () => {
+	const { address } = useWallet()
+	const [message, setMessage] = useState<string>()
+	const onClick = async () => {
+		if (!address) return
+		try {
+			// No await before submitCall: Nido's popup needs the click's gesture
+			const { result, hash } = await submitCall(address, (publicKey) =>
+				myContract.my_fn({ user: address }, { publicKey }),
+			)
+			setMessage(`Done: ${String(result)} in ${hash}`)
+		} catch (error) {
+			setMessage(describe(error, Errors)) // Errors: the generated client's table
+		}
+	}
+	return (
+		<SessionGate
+			grants={grants}
+			explain={<p>What the app may do, and how long</p>}
+		>
+			<button onClick={() => void onClick()}>Do it</button>
+			{message && <p>{message}</p>}
+		</SessionGate>
+	)
+}
+```
+
+Everything here comes from `@stellar-scaffold/app-lib` (the template's
+`app-lib/`), except `SessionGate` (`app/src/components/`) and your client.
+`components/GuessTheNumber.tsx` is the full sample; `--blank` apps have
+`components/CheckIn.tsx`.
+
+- `submitCall(address, build)` is the call site in one step. It reserves Nido's
+  popup during the click, builds the call with a transaction source a C-address
+  can use, submits it, and resolves with `{ result, hash }` once confirmed:
+  through the connected wallet for a G-address, through this app's session key
+  for a Nido account with a session, otherwise through Nido's popup. The parts
+  are exported too, for your own flow: `reserveSigningPopup`,
+  `transactionSource`, `submitContract`.
+- `SessionGate` shows its children to classic wallets, and to a Nido account
+  once its approvals cover `grants`. Until then it explains what will be asked,
+  sends the owner to Nido for the grants still missing or expired, and shows a
+  pending state while it prepares the key. With `actionsOnly`, the children stay
+  visible and only their buttons and inputs wait.
+- `describe(error, contractErrors)` turns failures into sentences: the account's
+  refusals (#3221 over the cap; #3002 or #3016 no rule covers the call, or it
+  expired; #3014 a contract in the call has no rule), Nido's relayer codes, and
+  your contract's `Error(Contract, #n)` looked up in `contractErrors` (the
+  generated client's `Errors`, or your own table).
+- `isOverCap(error)` is true when the account refused a call for going over a
+  grant's cap (#3221), so you can say what the cap was and when to come back.
+  The account checks during simulation, so nothing was sent or paid.
+- `isSmartAccount(address)` tells a Nido C-address from a classic G-address, for
+  example to link `/contract/` rather than `/account/` on an explorer.
+
+## How a Nido account authorizes your app
+
+A Nido account is a Perch smart account. Its passkey signs under rule 0,
+"admin", which covers only calls on the account itself. **Nido's sign popup
+cannot authorize a call into your contract**: the account refuses with `#3002`
+(one contract) or `#3014` (several). Your app acts for the account through a
+**session** instead (`app-lib/session.ts`):
+
+1. The app makes an ed25519 key and has Friendbot fund it, so it can pay fees.
+2. For each grant, the owner goes to
+   `https://<account>.test.nido.fyi/security/delegate-doc/`, sees exactly what
+   the rule allows, confirms with the passkey, and Nido applies the updated
+   policy document (`apply_doc`) through its relayer.
+3. The app signs later calls itself: a CAP-0071 `AddressWithDelegates` entry for
+   the account, naming the approved rule for each contract, signed by its key.
+   The key pays the fee; the account pays everything else, and checks the rule
+   and its cap on every call.
+
+The rules that follow from it:
+
+- **One grant per contract in the call's authorization tree**, and
+  `require_auth()` at the root. Relying on a token's own check instead makes the
+  authorization non-root, and simulation refuses it: "authorization not tied to
+  the root contract invocation".
+- **`limit` caps cumulative `transfer` amounts**, and only on a grant whose
+  `target` is that token (`xlmTokenId` for XLM). A grant without a cap makes
+  Nido ask the owner to accept "no cap" explicitly. For a contract that moves no
+  money, that is expected.
+- **`label`** is the rule's name, at most 20 bytes. Asking again with the same
+  label replaces that rule, which is how the app renews an expired one.
+  `duration` is `24h`, `7d` or `30d`.
+- **The session key lives in this origin's `localStorage`**, and the origin
+  includes the port. That is why each app has a fixed `PORT` with `strictPort`:
+  a dev server on another port has no session. The key never holds the user's
+  funds; whoever reads it can spend at most the cap until the rules expire.
+- **Revoking doesn't work in Nido yet**, so grants end at their expiry. "Forget
+  it" deletes this browser's copy of the key; approving again replaces the
+  rules, and the old key stops working.
+- **Session calls never touch Nido's relayer.** The key pays its own fees,
+  because the relayer cannot submit CAP-0071 entries yet. Account creation and
+  grants do go through the relayer.
+
+Some patterns that work:
+
+- **An action that moves no money** (claim, vote, check in): one grant on your
+  contract, no cap. The `--blank` starter is this.
+- **A capped payment** (tip, buy): two grants, your contract plus the token with
+  a `limit`. Guess the Number is this: 1 XLM a wrong guess, capped at 2 XLM a
+  day. Its `period` matches the grant's 24-hour `duration`, so the cap is also
+  the most one approval can spend.
+- **Shared funds** (a group pot): your contract holds the money and pays out
+  when enough members approve; each member uses their own Nido account.
+- **Limits for someone else** (an allowance): a cap limits a key, not the
+  account's admin. Keep custody in a contract the limited person doesn't
+  administer.
+- **Time locks**: a rule's expiry stops a key; it doesn't delay a withdrawal.
+  Put unlock dates in your contract.
+
+## When Nido's relayer says no
+
+Nido's relayer pays for creating accounts and applying grants, out of one budget
+shared by everyone on testnet (100 XLM a day, counted by the fee bid). Measured
+on 2026-10-22: an account costs about 1.4 XLM, a first grant about 4.5 XLM (it
+writes the policy document), a capped grant about 2.7 XLM.
+
+When the budget runs out, or the relayer is busy or slow, Nido's grant page
+currently says "We couldn't confirm what happened to this transaction on-chain…
+retrying could pay twice" in every case, though they differ:
+
+| What happened                          | Relayer answer           | Landed?   |
+| -------------------------------------- | ------------------------ | --------- |
+| The shared budget is used up           | 429 `FEE_LIMIT_EXCEEDED` | No        |
+| The relayer is busy                    | 503 `POOL_CAPACITY`      | No        |
+| The relayer timed out after submitting | 504                      | Sometimes |
+
+What to do:
+
+1. **Go back to the app** (the browser's Back button). The gate says Nido hasn't
+   confirmed the grant.
+2. **Check again.** The app reads your account's rules on chain. If the grant
+   landed, the session is ready.
+3. If nothing landed, **Ask Nido again**. It reuses the app's key, so there is
+   no second Friendbot wait, and asking again can't pay twice for a grant that
+   isn't there. If the budget is used up, wait and try later.
+
+**Paying your own fee.** The passkey signs the grant and a nonce, not the fee
+payer, so any funded key can submit it. When Nido sends the signed approval back
+(`?delegation=signed&payload=…`, or `#…`), the app submits it with its own
+session key, which Friendbot funded, and the grant lands without the relayer. On
+testnet that cost 0.26 XLM for an uncapped grant (the fee charged, not the
+relayer's bid). Nido's page doesn't offer this yet; the app side is ready, as is
+`?delegation=error&code=…`, which the app turns into a sentence.
+
+By hand, the rules are one command away:
+`npm run stellar -- contract invoke --id <your C-address> --network testnet --send=no -- installed_rules`.
+
+## Testing
+
+```sh
+npm run test:unit           # app-lib session logic, new-app, vendor module
+npm run prepare:prototype   # offline clients with a placeholder ID: no deploy, no keys
+npm run test:e2e            # Playwright against the real app; wallet pages and RPC mocked
+```
+
+The browser tests run the real React app, wallet picker, Nido popup transport,
+session requests, CAP-0071 signing, generated client and RPC parser, with Nido's
+pages and the RPC mocked. They prove the app's side of each exchange, not that
+the chain accepts it. Don't sign against a prototype client's placeholder
+contract ID.
+
+For the real thing without a person, `npm run test-browser` starts a throwaway
+Chrome whose every tab and popup has a virtual passkey, and prints the settings
+for a browser driver such as chrome-devtools-axi. Create the account at
+https://test.nido.fyi in that browser.
+
+### Verified live on testnet
+
+All with a Nido account created in an automated browser with a throwaway virtual
+passkey.
+
+| Check (2026-10-22)                           | Result                                                                                        |
+| -------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| Create a Nido account                        | Address reserved before the passkey, account deployed and funded with 5 XLM by Nido's relayer |
+| Connect through the wallet picker            | C-address and its SAC balance in the header                                                   |
+| Guess through Nido's sign popup              | Popup blocked until `reserveSigningPopup`; then refused by the account: `#3014`               |
+| Approve a session (two grants)               | Rules `guess` and `guess-xlm` installed, delegated to the app's key                           |
+| Guess with the session key                   | Confirmed, no prompt (`f7062542e9f7110cebe357bdd7c2d7d9d34d79a95ae03e6c5ba96041c162a51b`)     |
+| Spend over a 2 XLM/day cap                   | Refused by the account: `#3221` (`SpendingLimitExceeded`) after 0.5 + 1.0 XLM went through    |
+| Submit a session call through Nido's relayer | Refused: the relayer cannot decode `AddressWithDelegates` yet, so the key pays its own fee    |
+
+The v2 quick start, from a clean copy (details in the kit's
+`docs/template-v2-check.md`):
+
+| Check (2026-10-22, v2)                   | Result                                                                                                                              |
+| ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `new-app --blank` → first confirmed call | 5 min 52 s, of which the commands took 55 s (Scaffold prebuilt in 1 s, `deploy:testnet` 44 s cold)                                  |
+| Approve one grant                        | "Preparing a key…" for 11 s, then Nido's page; applied by the relayer                                                               |
+| Check in with the session key            | Confirmed, no prompt (`7f4737df4552f34a20bdf46f52d01f30e7a9168d84068a4055a1498cd9d87b8f`)                                           |
+| Check again after a refused grant        | "Nothing was applied yet": a rule for an older key isn't counted                                                                    |
+| Pay your own fee (`delegation=signed`)   | Session key submitted the passkey-signed `apply_doc` (`f4266b8b22562744243b7e464a1169c0c9446e5eb3782b2b16acf7eb35bbf6f9`), 0.26 XLM |
+| Approve again with the same label        | The rule is replaced; only the new key is delegated                                                                                 |
+
+## Troubleshooting
+
+- **`npm warn allow-scripts`** lines during `npm ci`: harmless; nothing in the
+  template needs those install scripts.
+- **"An identity with the name … already exists"**: harmless; Scaffold checks
+  for the deployer on every build.
+- **Port in use** when `npm run dev` starts: another process holds this app's
+  `PORT`. Stop it, or set another `PORT` in `.env` and approve the session again
+  on the new origin.
+- **Two incompatible `AssembledTransaction` types** in TypeScript: a fresh
+  client brought its own SDK; run `npm run link-clients`.
+- **504 "Outdated Optimize Dep"** after changing dependencies: restart Vite with
+  `--force`.
+- **Contracts gone after a testnet reset**: `npm run deploy:testnet` again.
+
+## Reference
+
+- `vendor/nido-wallet` carries the Nido Wallets Kit module from nidohq/nido
+  `3e3f350`, which handles `nido_submitted` responses, plus the small changes
+  listed in its README, including `reserveCeremonyPopup`. Replace it with a
+  reviewed public release when one exists.
+- CAP-0071 signing needs `@stellar/stellar-sdk` 16.4 or newer
+  (`buildWithDelegatesEntry`). `npm run link-clients` keeps generated clients on
+  app-lib's copy.
+- Nido's `ADD-NIDO-TO-DAPP.md` and module README still say the dApp submits the
+  signed XDR; for transactions the wallet now submits and returns a hash, which
+  the app must not broadcast again.
+- The adapter reports a configured passphrase; it can't discover the
+  deployment's actual network, so Nido is registered only on testnet. Other
+  networks keep the default wallet list. Friendbot creates classic accounts; the
+  Fund button is hidden for C-addresses.
+- This layout derives from the official React template at
+  `stellar-scaffold/ui@505354435c43e8d7af19c84bcb198990e36f983b`, already in its
+  final `app/`, `app-lib/`, `contracts/` shape.
