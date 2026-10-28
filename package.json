@@ -1,5 +1,5 @@
 {
-  "name": "guess-the-number-example",
+  "name": "@stellar-scaffold/ui",
   "version": "0.0.0",
   "private": true,
   "scripts": {
