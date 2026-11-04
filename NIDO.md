@@ -205,17 +205,18 @@ passkey:
 2. The owner opens `https://<account>--356.test.nido.fyi/security/delegate-doc/`
    in a popup, with every grant the screen needs and the app's public key
    (`pubkey=`). Nido shows each rule, the owner confirms once with their own
-   passkey, and Nido applies the updated policy document (`apply_doc`); the M6
-   preview submits it from a Friendbot-funded key in the wallet's origin. The
-   rules name the app's passkey as an `External` signer, checked by the same
-   WebAuthn verifier as the owner's.
+   passkey, and Nido applies the app's rules in a scoped document for the app's
+   origin (`apply_scope`); the M6 preview submits it from a Friendbot-funded key
+   in the wallet's origin. The rules name the app's passkey as an `External`
+   signer, checked by the same WebAuthn verifier as the owner's.
 3. For each later call the app asks the device to sign the account's auth entry
    with its passkey (one prompt), naming the approved rule for each call: on
-   that contract, allowing that function (from the account's policy document),
-   and one of this app's own grants when another rule on the same contract names
-   the same passkey. The account checks the signature, the rules and the cap in
-   a simulation, then a Friendbot-funded key in this browser submits the call
-   and pays the fee.
+   that contract, allowing that function (from the origin's scoped document, or
+   the account's policy document for a grant made before scopes), and one of
+   this app's own grants when another rule on the same contract names the same
+   passkey. The account checks the signature, the rules and the cap in a
+   simulation, then a Friendbot-funded key in this browser submits the call and
+   pays the fee.
 
 The rules that follow from it:
 

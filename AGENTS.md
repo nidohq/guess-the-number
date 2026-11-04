@@ -135,9 +135,10 @@ export const MyAction = () => {
 - `isOverCap(error)`: the #3221 refusal, for a message that names your cap. A
   call over a cap stops before the passkey prompt (`CapReachedError`, `until`);
   `capReachedUntil(address, grants)` says until when, to keep a button off.
-- Rules are picked per call by contract and function (from the account's
-  `document()`), preferring this app's grant labels over other rules on the same
-  contract.
+- Rules are picked per call by contract and function, from the scoped document
+  Nido keeps for the app's origin (`scope(id)`, `scope_doc(id)`; ids derived
+  from the origin) and then the account's `document()`, preferring this app's
+  grant labels over other rules on the same contract.
 - `isSmartAccount(address)` tells a C-address from a G-address.
 
 ## Smart accounts (C-addresses): what works

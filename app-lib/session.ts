@@ -872,7 +872,9 @@ type NativeRule = {
 	name: string
 	context_type: unknown
 	signers: unknown[]
-	policies?: { policy: string }[]
+	/** `installed_rules()` gives `{ policy }` records, `get_context_rule()`
+	 * the addresses alone. */
+	policies?: ({ policy: string } | string)[]
 	valid_until?: number | null
 }
 
@@ -928,7 +930,9 @@ export function parseRules(
 					}
 				: {}),
 			...(to ? { to } : {}),
-			policies: (rule.policies ?? []).map((p) => String(p.policy)),
+			policies: (rule.policies ?? []).map((p) =>
+				typeof p === "string" ? p : String(p.policy),
+			),
 			external: signers.flatMap((s) =>
 				s?.[0] === "External"
 					? [{ verifier: String(s[1]), key: toHex(s[2] as Uint8Array) }]
@@ -961,12 +965,13 @@ async function read(
 	method: string,
 	server: rpc.Server,
 	networkPassphrase: string,
+	args: xdr.ScVal[] = [],
 ): Promise<{ value: unknown; latestLedger: number }> {
 	const tx = new TransactionBuilder(new Account(SIMULATION_SOURCE, "0"), {
 		fee: "100",
 		networkPassphrase,
 	})
-		.addOperation(new Contract(account).call(method))
+		.addOperation(new Contract(account).call(method, ...args))
 		.setTimeout(30)
 		.build()
 	const sim = await server.simulateTransaction(tx)
@@ -978,27 +983,109 @@ async function read(
 	}
 }
 
-/** Read the account's installed rules, with their functions and caps from
- * its policy document (`document()`: revision, canonical JSON as bytes). */
+/**
+ * Read the rules this app's passkey may sign under: those of the scoped
+ * document Nido keeps for this page's origin (`readScopedRules`), then the
+ * account's installed rules, with their functions and caps from its policy
+ * document (`document()`: revision, canonical JSON as bytes), where Nido
+ * put an app's grants before it kept them in a scope. The scope's come
+ * first, so its rule wins over an older one of the same name.
+ */
 export async function readRules(
 	account: string,
 	server: rpc.Server,
 	networkPassphrase: string,
+	origin = globalThis.location?.origin,
 ): Promise<{ rules: InstalledRule[]; latestLedger: number }> {
-	const [installed, written] = await Promise.all([
+	const [installed, written, scoped] = await Promise.all([
 		read(account, "installed_rules", server, networkPassphrase),
 		read(account, "document", server, networkPassphrase).catch(() => undefined),
+		origin
+			? readScopedRules(account, origin, server, networkPassphrase)
+			: Promise.resolve([]),
 	])
 	const bytes = Array.isArray(written?.value) ? written.value[1] : undefined
 	const json =
 		bytes instanceof Uint8Array ? new TextDecoder().decode(bytes) : undefined
 	return {
-		rules: parseRules(
-			installed.value as NativeRule[],
-			json ? (JSON.parse(json) as { rules: DocRule[] }) : undefined,
-		),
+		rules: [
+			...scoped,
+			...parseRules(
+				installed.value as NativeRule[],
+				json ? (JSON.parse(json) as { rules: DocRule[] }) : undefined,
+			),
+		],
 		latestLedger: installed.latestLedger,
 	}
+}
+
+/** How many scope ids Nido tries for one app origin. */
+const APP_SCOPE_CANDIDATES = 4
+const APP_SCOPE_DOMAIN = new TextEncoder().encode("nido/app-scope/v1")
+
+/** The scope ids Nido may keep `origin`'s rules under, in the order it tries
+ * them: the big-endian `u32` of the first four bytes of
+ * `sha256("nido/app-scope/v1" || 0 || origin || 0 || i)`. */
+export async function appScopeCandidates(origin: string): Promise<number[]> {
+	const o = new TextEncoder().encode(new URL(origin).origin)
+	return Promise.all(
+		Array.from({ length: APP_SCOPE_CANDIDATES }, async (_, i) => {
+			const digest = await sha256(
+				concat(APP_SCOPE_DOMAIN, Uint8Array.of(0), o, Uint8Array.of(0, i)),
+			)
+			return new DataView(digest.buffer).getUint32(0)
+		}),
+	)
+}
+
+/**
+ * The rules of `origin`'s scoped document on a Perch account that keeps
+ * them (the M6 stack, `apply_scope`): the first candidate scope whose every
+ * signer id is `<origin>#<8 hex>`. Its rules are installed with OZ ids that
+ * `scope(id)` lists, apart from `installed_rules`. None when the account
+ * keeps no scopes, no candidate is the origin's, or a recovery has wiped
+ * it (its rules authorize nothing).
+ */
+async function readScopedRules(
+	account: string,
+	origin: string,
+	server: rpc.Server,
+	networkPassphrase: string,
+): Promise<InstalledRule[]> {
+	const call = async (method: string, args: xdr.ScVal[] = []) =>
+		(await read(account, method, server, networkPassphrase, args)).value
+	const generation = await call("scope_generation").catch(() => undefined)
+	if (generation === undefined) return []
+	const o = new URL(origin).origin
+	const own = (signer: string) =>
+		signer.startsWith(`${o}#`) &&
+		/^[0-9a-f]{8}$/.test(signer.slice(o.length + 1))
+	for (const id of await appScopeCandidates(origin)) {
+		const scope = [xdr.ScVal.scvU32(id)]
+		const record = (await call("scope", scope)) as {
+			gen: bigint
+			rules: { id: number; name: string }[]
+		} | null
+		if (!record) continue
+		const bytes = await call("scope_doc", scope)
+		if (!(bytes instanceof Uint8Array)) continue
+		const doc = JSON.parse(new TextDecoder().decode(bytes)) as {
+			rules: DocRule[]
+			signers?: { id: string }[]
+		}
+		if (!doc.signers?.length || !doc.signers.every((s) => own(s.id))) continue
+		if (BigInt(record.gen) !== BigInt(generation as bigint)) return []
+		const native = await Promise.all(
+			record.rules.map(
+				(r) =>
+					call("get_context_rule", [
+						xdr.ScVal.scvU32(Number(r.id)),
+					]) as Promise<NativeRule>,
+			),
+		)
+		return parseRules(native, doc)
+	}
+	return []
 }
 
 /** A cap's recent spending, as its `spending_limit` policy stores it. */

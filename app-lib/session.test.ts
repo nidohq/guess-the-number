@@ -17,6 +17,7 @@ import {
 } from "@stellar/stellar-sdk"
 import {
 	activeSession,
+	appScopeCandidates,
 	authContexts,
 	authDigest,
 	authPayload,
@@ -33,6 +34,7 @@ import {
 	loadSession,
 	parseRules,
 	passkeySigners,
+	readRules,
 	requestSession,
 	resumeSession,
 	ruleIdsFor,
@@ -664,6 +666,166 @@ const installed = (
 		})),
 		{ type: { id: ["symbol", null] } },
 	)
+
+describe("an app's scoped document", () => {
+	const origin = "http://localhost:5542"
+	const scopeId = (o: string, i: number) =>
+		createHash("sha256")
+			.update(
+				Buffer.concat([
+					Buffer.from("nido/app-scope/v1"),
+					Buffer.from([0]),
+					Buffer.from(o),
+					Buffer.from([0, i]),
+				]),
+			)
+			.digest()
+			.readUInt32BE(0)
+
+	it("tries the ids Nido derives from the origin, in order", async () => {
+		expect(await appScopeCandidates(origin)).toEqual(
+			[0, 1, 2, 3].map((i) => scopeId(origin, i)),
+		)
+		// The origin's serialization: no path, no default port
+		expect(await appScopeCandidates("https://app.example:443/play")).toEqual(
+			await appScopeCandidates("https://app.example"),
+		)
+	})
+
+	/** An account whose candidate 0 holds `first`'s scope and candidate 1
+	 * holds `second`'s, each with a `guess` rule (OZ ids 7 and 8), beside an
+	 * older `guess` rule in the admin document (id 2). */
+	const scopedAccount = (first: string, second: string, gen = 1n) => {
+		const rule = (id: number) =>
+			nativeToScVal(
+				{
+					context_type: xdr.ScVal.scvVec([
+						xdr.ScVal.scvSymbol("CallContract"),
+						new Address(app).toScVal(),
+					]),
+					id: nativeToScVal(id, { type: "u32" }),
+					name: "guess",
+					policies: xdr.ScVal.scvVec([]),
+					signers: xdr.ScVal.scvVec([
+						xdr.ScVal.scvVec([
+							xdr.ScVal.scvSymbol("External"),
+							new Address(verifier).toScVal(),
+							nativeToScVal(Buffer.from(keyData, "hex")),
+						]),
+					]),
+					valid_until: nativeToScVal(1_720, { type: "u32" }),
+				},
+				{ type: { id: ["symbol", null] } },
+			)
+		const scopes = new Map(
+			[first, second].map((o, i) => [
+				scopeId(origin, i),
+				{
+					ruleId: 7 + i,
+					doc: JSON.stringify({
+						signers: [{ id: `${o}#0123abcd` }],
+						rules: [
+							{
+								name: "guess",
+								functions: ["guess"],
+								scope: { type: "contract", address: app },
+							},
+						],
+					}),
+				},
+			]),
+		)
+		const arg = (tx: { operations: Operation.InvokeHostFunction[] }) =>
+			tx.operations[0]!.func.invokeContract().args()[0]
+		return {
+			simulateTransaction: vi.fn(
+				async (tx: { operations: Operation.InvokeHostFunction[] }) => {
+					const method = tx.operations[0]!.func.invokeContract()
+						.functionName()
+						.toString()
+					const scope = () => scopes.get(arg(tx)!.u32())
+					switch (method) {
+						case "installed_rules":
+							return simulated(
+								installed([
+									{ id: 2, name: "guess", contract: app, key: keyData },
+								]),
+							)
+						case "scope_generation":
+							return simulated(nativeToScVal(gen, { type: "u64" }))
+						case "scope":
+							return simulated(
+								scope()
+									? nativeToScVal(
+											{
+												doc_hash: nativeToScVal(Buffer.alloc(32)),
+												gen: nativeToScVal(1n, { type: "u64" }),
+												rules: xdr.ScVal.scvVec([
+													nativeToScVal(
+														{
+															id: nativeToScVal(scope()!.ruleId, {
+																type: "u32",
+															}),
+															name: "guess",
+														},
+														{ type: { id: ["symbol", null] } },
+													),
+												]),
+											},
+											{ type: { doc_hash: ["symbol", null] } },
+										)
+									: xdr.ScVal.scvVoid(),
+							)
+						case "scope_doc":
+							return simulated(
+								scope()
+									? nativeToScVal(Buffer.from(scope()!.doc))
+									: xdr.ScVal.scvVoid(),
+							)
+						case "get_context_rule":
+							return simulated(rule(arg(tx)!.u32()))
+						default:
+							return { latestLedger: 1_000, error: "no document" }
+					}
+				},
+			),
+		} as unknown as rpc.Server
+	}
+
+	it("reads the origin's scope first, skipping another origin's", async () => {
+		const server = scopedAccount("https://other.example", origin)
+		const { rules } = await readRules(account, server, Networks.TESTNET, origin)
+		expect(rules.map((r) => [r.id, r.name, r.functions])).toEqual([
+			[8, "guess", ["guess"]],
+			[2, "guess", undefined],
+		])
+		expect(rules[0]).toMatchObject({ contract: app, policies: [] })
+		// The scope's rule wins over the admin document's of the same name
+		expect(
+			ruleIdsFor(
+				[{ contract: app, fn: "guess", args: [] }],
+				rules,
+				passkey,
+				1_000,
+				["guess"],
+			),
+		).toEqual([8])
+	})
+	it("leaves out a scope a recovery wiped, and works without an origin", async () => {
+		const wiped = scopedAccount(origin, "https://other.example", 2n)
+		expect(
+			(await readRules(account, wiped, Networks.TESTNET, origin)).rules.map(
+				(r) => r.id,
+			),
+		).toEqual([2])
+		const server = scopedAccount(origin, "https://other.example")
+		expect(
+			(await readRules(account, server, Networks.TESTNET, undefined)).rules.map(
+				(r) => r.id,
+			),
+		).toEqual([2])
+	})
+})
 
 describe("checking the chain for what landed", () => {
 	it("counts a grant that names a recipient only when the rule pays that address", async () => {

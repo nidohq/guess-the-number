@@ -23,7 +23,11 @@ Testnet only.
 > locally (below), and create its Nido account on the preview, in the same
 > browser: an invitation link, or
 > `https://356.test.nido.fyi/new-account/?setup=1#salt=<64 hex>` (for example
-> from `openssl rand -hex 32`).
+> from `openssl rand -hex 32`). The preview keeps each app's rules in a scoped
+> document for the app's origin, and the app reads them there first. An account
+> that approved this app before the preview did that must reconnect once, so its
+> game rules move into the scope: press "Forget it" under the game, then make
+> the app's passkey and approve with Nido again.
 
 > Until 2026-10-24 the site used Nido's preview of
 > [nidohq/nido#318](https://github.com/nidohq/nido/pull/318); it now uses
