@@ -15,7 +15,8 @@
 // device asks for it on every call, and its private key never leaves the
 // authenticator: the app keeps only the public key and the credential id, so
 // nothing in the browser can spend. A passkey-signed call is an ordinary
-// authorization entry, so Nido's relayer submits it and pays the fee.
+// authorization entry, so Nido's relayer submits it and pays the fee, or, in
+// local-submitter mode (`localSubmitter.ts`), a key in this browser does.
 //
 // One passkey per account and origin. The grants a gate needs go to Nido in
 // one request, which the owner approves with one confirmation. Nido replaces a
@@ -39,6 +40,7 @@ import {
 	scValToNative,
 	xdr,
 } from "@stellar/stellar-sdk"
+import { localSubmitter, submitLocally } from "./localSubmitter"
 
 export type GrantDuration = "24h" | "7d" | "30d"
 export type LimitPeriod = "day" | "week" | "30d"
@@ -1008,12 +1010,14 @@ export interface CapWindow {
 
 /** The spending window of `rule`'s cap on `account`, read from its policy's
  * storage (`AccountContext(account, rule id)`); `undefined` before the first
- * spend. */
+ * spend. A Perch account on rule-eval (the M6 stack) attaches no policy to a
+ * document rule and keeps the window itself (`readOwnCapWindow`). */
 async function readCapWindow(
 	account: string,
 	rule: InstalledRule,
 	server: rpc.Server,
 ): Promise<CapWindow | undefined> {
+	if (!rule.policies.length) return readOwnCapWindow(account, rule, server)
 	const key = xdr.ScVal.scvVec([
 		xdr.ScVal.scvSymbol("AccountContext"),
 		new Address(account).toScVal(),
@@ -1043,6 +1047,42 @@ async function readCapWindow(
 		spent: data.spending_history.map((e) => ({
 			amount: BigInt(e.amount),
 			ledger: Number(e.ledger_sequence),
+		})),
+	}
+}
+
+/** The spending window an M6 account keeps for a capped rule in its own
+ * storage (`SpendRecords(rule id)`: the spends still in the window), with
+ * the cap from its policy document. */
+async function readOwnCapWindow(
+	account: string,
+	rule: InstalledRule,
+	server: rpc.Server,
+): Promise<CapWindow | undefined> {
+	if (!rule.cap) return undefined
+	const { entries } = await server.getLedgerEntries(
+		xdr.LedgerKey.contractData(
+			new xdr.LedgerKeyContractData({
+				contract: new Address(account).toScAddress(),
+				key: xdr.ScVal.scvVec([
+					xdr.ScVal.scvSymbol("SpendRecords"),
+					xdr.ScVal.scvU32(rule.id),
+				]),
+				durability: xdr.ContractDataDurability.persistent(),
+			}),
+		),
+	)
+	const entry = entries[0]
+	if (!entry) return undefined
+	const data = scValToNative(entry.val.contractData().val()) as {
+		history: { amount: bigint; ledger: number }[]
+	}
+	return {
+		limit: rule.cap.limit,
+		periodLedgers: rule.cap.periodLedgers,
+		spent: data.history.map((e) => ({
+			amount: BigInt(e.amount),
+			ledger: Number(e.ledger),
 		})),
 	}
 }
@@ -1142,8 +1182,16 @@ export function isOverCap(error: unknown): boolean {
 	return message.includes("#3221") || message.includes(OVER_CAP)
 }
 
+/** A Perch account on rule-eval (the M6 stack) refuses an authorization its
+ * rules don't allow with its own `RuleEvalRefused`, #5, where OZ answered
+ * #3002, #3014 or #3221: over a cap, no covering rule, or an expired one. */
+const RULE_EVAL_REFUSED =
+	/Error\(Contract, #5\)[\s\S]*__check_auth|__check_auth[\s\S]*Error\(Contract, #5\)/
+
 function accountRefusal(message: string): string | undefined {
 	if (message.includes("#3221")) return OVER_CAP
+	if (RULE_EVAL_REFUSED.test(message))
+		return "Your account refused: no approved rule allows this call for this app (it may be over the spending cap, or expired)."
 	if (message.includes("#3002") || message.includes("#3016"))
 		return "Your account refused: no approved rule covers this call for this app (it may have expired)."
 	if (message.includes("#3014"))
@@ -1264,18 +1312,25 @@ async function relay(
 
 /**
  * Sign `tx`'s call with this app's passkey under the account's approved
- * rules (the device asks once), hand it to Nido's relayer, and return the
- * confirmed result. The account checks the signature, the rules and any cap
- * in a simulation first, so a refused call is never sent and costs nothing.
+ * rules (the device asks once), hand it to Nido's relayer (or, with `local`,
+ * submit it from this browser's own key), and return the confirmed result.
+ * The account checks the signature, the rules and any cap in a simulation
+ * first, so a refused call is never sent and costs nothing.
  * `onStage` hears `passkey`, `sending` and `confirming` as they start.
  */
 export async function submitWithSession<T>(
 	tx: contract.AssembledTransaction<T>,
 	session: Session,
-	network: { server: rpc.Server; networkPassphrase: string; relayer: string },
+	network: {
+		server: rpc.Server
+		networkPassphrase: string
+		relayer: string
+		/** Local-submitter mode: no relayer (see `localSubmitter.ts`). */
+		local?: boolean
+	},
 	onStage?: (stage: SubmitStage) => void,
 ): Promise<{ result: T; hash: string }> {
-	const { server, networkPassphrase, relayer } = network
+	const { server, networkPassphrase, relayer, local } = network
 	if (!tx.built) throw new Error("Simulate the call before submitting it")
 	const op = tx.built.operations[0]
 	if (op?.type !== "invokeHostFunction")
@@ -1332,7 +1387,11 @@ export async function submitWithSession<T>(
 	}
 
 	onStage?.("sending")
-	const signed = new TransactionBuilder(new Account(SIMULATION_SOURCE, "0"), {
+	const key = local ? await localSubmitter(server) : undefined
+	const source = key
+		? await server.getAccount(key.publicKey())
+		: new Account(SIMULATION_SOURCE, "0")
+	const signed = new TransactionBuilder(source, {
 		fee: "100",
 		networkPassphrase,
 	})
@@ -1346,7 +1405,10 @@ export async function submitWithSession<T>(
 	)
 	if (!rpc.Api.isSimulationSuccess(enforced))
 		throw new Error(explainRefusal(enforced.error))
-	const txHash = await relay(relayer, op.func, auth, onStage)
+	const txHash = key
+		? await submitLocally(signed, enforced, key, server)
+		: await relay(relayer, op.func, auth, onStage)
+	if (key) onStage?.("confirming")
 	const done = await server.pollTransaction(txHash, { attempts: 30 })
 	if (done.status !== rpc.Api.GetTransactionStatus.SUCCESS)
 		throw new Error(`Transaction ${txHash} ${done.status.toLowerCase()}`)

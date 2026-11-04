@@ -117,8 +117,9 @@ export const MyAction = () => {
 - `submitCall` = `reserveSigningPopup` + `transactionSource` (a C-address can't
   be a transaction source) + `submitContract` + release. It always resolves
   `{ result, hash }`: G-address via the wallet, C-address via the app's session
-  passkey (one device prompt, submitted by Nido's relayer), otherwise Nido's
-  popup. Its third argument `{ onStage }` reports `preparing`,
+  passkey (one device prompt, submitted from a Friendbot-funded key in the
+  browser, or by Nido's relayer with `PUBLIC_NIDO_LOCAL_SUBMITTER=0`), otherwise
+  Nido's popup. Its third argument `{ onStage }` reports `preparing`,
   `passkey`/`wallet`, `sending`, `confirming`; show them with `Pending` and
   `stageText` (`app/src/components/Pending.tsx`), cleared in a `finally`. Use
   `onSubmit`, not a form `action` (React defers an action's state updates).
@@ -128,8 +129,9 @@ export const MyAction = () => {
   visible but disabled. Several gates share one passkey; each asks only for what
   it lacks, all of it in one Nido popup and one confirmation.
 - `describe(error, contractErrors)`: #3221 over the cap, #3002/#3016 no rule or
-  expired, #3014 an uncovered contract in the tree, Nido relayer codes, and your
-  contract's `Error(Contract, #n)`.
+  expired, #3014 an uncovered contract in the tree, an M6 account's #5 from
+  `__check_auth` (any of those), Nido relayer codes, and your contract's
+  `Error(Contract, #n)`.
 - `isOverCap(error)`: the #3221 refusal, for a message that names your cap. A
   call over a cap stops before the passkey prompt (`CapReachedError`, `until`);
   `capReachedUntil(address, grants)` says until when, to keep a button off.
@@ -163,10 +165,11 @@ contract, #3014 for several). An app acts for a Nido account through a session.
 - The session signer is a second passkey the device makes for the app on its own
   origin (`createAppPasskey`), named in the rules as an `External` signer. The
   browser keeps only its public key and credential id: nothing there can spend.
-  Each session call asks the device once and goes through Nido's relayer, which
-  pays the fee. Origins include the port, so a moved dev server has no session:
-  keep `PORT` fixed. Browsers refuse passkeys on an IP, so open the app at
-  `localhost`, not `127.0.0.1`.
+  Each session call asks the device once; a key this browser keeps, funded by
+  testnet Friendbot, submits it and pays the fee (`app-lib/localSubmitter.ts`),
+  as the M6 preview wallet does for its own transactions. Origins include the
+  port, so a moved dev server has no session: keep `PORT` fixed. Browsers refuse
+  passkeys on an IP, so open the app at `localhost`, not `127.0.0.1`.
 - Keep `from.require_auth()` at the top of the function that moves the user's
   tokens, and ask for one grant per contract. Skipping it to rely on the token's
   own check makes the auth non-root, and simulation (recording mode, which
@@ -176,15 +179,18 @@ contract, #3014 for several). An app acts for a Nido account through a session.
 
 ## When Nido's relayer refuses
 
-Account creation and grants go through Nido's relayer, which has one shared
-testnet budget (100 XLM a day; a first grant bids about 4.5 XLM, a capped one
-about 2.7). Session calls go through it too. Its grant page shows "We couldn't
-confirm what happened…" for a 429 `FEE_LIMIT_EXCEEDED` (nothing sent), a 503
-`POOL_CAPACITY` (nothing sent) and a 504 (may have landed). Recover from the
-app, not by retrying blindly: the gate's **Check again** reads `installed_rules`
-and records any grant that landed; **Ask Nido again** reuses the passkey.
-`delegation=error&code=…` becomes a sentence; when the popup was blocked and the
-page went to Nido, `resumeSession` reads the answer on return.
+The M6 preview wallet this branch uses (https://356.test.nido.fyi) and this
+app's session calls (`PUBLIC_NIDO_LOCAL_SUBMITTER=1`) never call the relayer:
+Friendbot-funded keys in the browser pay instead. Elsewhere, account creation
+and grants go through Nido's relayer, which has one shared testnet budget (100
+XLM a day; a first grant bids about 4.5 XLM, a capped one about 2.7), and so do
+session calls with `PUBLIC_NIDO_LOCAL_SUBMITTER=0`. Its grant page shows "We
+couldn't confirm what happened…" for a 429 `FEE_LIMIT_EXCEEDED` (nothing sent),
+a 503 `POOL_CAPACITY` (nothing sent) and a 504 (may have landed). Recover from
+the app, not by retrying blindly: the gate's **Check again** reads
+`installed_rules` and records any grant that landed; **Ask Nido again** reuses
+the passkey. `delegation=error&code=…` becomes a sentence; when the popup was
+blocked and the page went to Nido, `resumeSession` reads the answer on return.
 
 ## Testing with a real Nido account
 
@@ -195,7 +201,8 @@ popup with virtual passkeys saved in `target/nido-passkeys.json`, and writes
 `target/test-browser.env` (`CHROME_DEVTOOLS_AXI_BROWSER_URL`,
 `CHROME_DEVTOOLS_AXI_SESSION`). Load it (`set -a; . target/test-browser.env`)
 and drive the browser, for example with chrome-devtools-axi. Create the account
-at https://test.nido.fyi; it arrives funded with 5 test XLM.
+at https://356.test.nido.fyi (`/new-account/?setup=1#salt=<64 hex>`); Friendbot
+funds it.
 
 chrome-devtools-axi notes: refs go stale after any re-render, so take a fresh
 snapshot right before each click; `fill` may not update a React-controlled

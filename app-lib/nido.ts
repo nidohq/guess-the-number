@@ -15,8 +15,16 @@ import { type SubmitStage } from "./session"
 
 export const isSmartAccount = StrKey.isValidContract
 
-/** Hosted Nido's testnet wallet; apps override it with `PUBLIC_NIDO_BASE`. */
-export const NIDO_BASE = "https://test.nido.fyi"
+/** The Nido wallet this branch plays against: the preview of nidohq/nido#356,
+ * on the separate M6 testnet deployment. Apps override it with
+ * `PUBLIC_NIDO_BASE`. */
+export const NIDO_BASE = "https://356.test.nido.fyi"
+
+/** Whether session calls go out from a Friendbot-funded key in the browser
+ * instead of a relayer (`localSubmitter.ts`): "1", as the preview wallet
+ * does, which runs without the shared relayer. Apps override it with
+ * `PUBLIC_NIDO_LOCAL_SUBMITTER`; testnet only. */
+export const NIDO_LOCAL_SUBMITTER = "1"
 
 /** Hosted Nido's testnet relayer; apps override it with `PUBLIC_NIDO_RELAYER`. */
 export const NIDO_RELAYER = "https://nido.fly.dev"
