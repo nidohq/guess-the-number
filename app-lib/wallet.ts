@@ -12,6 +12,7 @@ import {
 } from "@nidohq/stellar-wallets-kit-module"
 import {
 	NIDO_BASE,
+	NIDO_LOCAL_SUBMITTER,
 	NIDO_RELAYER,
 	createNidoModules,
 	isSmartAccount,
@@ -70,6 +71,12 @@ export const nidoBase: string = import.meta.env.PUBLIC_NIDO_BASE || NIDO_BASE
  * (`PUBLIC_NIDO_RELAYER`). */
 export const nidoRelayer: string =
 	import.meta.env.PUBLIC_NIDO_RELAYER || NIDO_RELAYER
+
+/** Whether session calls skip the relayer and go out from a Friendbot-funded
+ * key in this browser (`PUBLIC_NIDO_LOCAL_SUBMITTER`, testnet only). */
+export const nidoLocalSubmitter: boolean =
+	(import.meta.env.PUBLIC_NIDO_LOCAL_SUBMITTER || NIDO_LOCAL_SUBMITTER) ===
+		"1" && stellarNetwork === "TESTNET"
 
 StellarWalletsKit.init({
 	network: networkPassphrase as Networks,
@@ -144,7 +151,7 @@ export interface SubmitOptions {
  * - G-address: the wallet signs, the SDK sends (`signAndSend`).
  * - C-address with an approved session (see `session.ts`): this app's
  *   passkey signs under the account's rules (one device prompt), and Nido's
- *   relayer submits.
+ *   relayer submits (in local-submitter mode, a key in this browser does).
  * - C-address without one: Nido's popup. Its passkey signs under the
  *   account's admin rule, which only covers calls on the account itself, so
  *   a call into another contract is refused; request a session for those.
@@ -166,7 +173,12 @@ export async function submitContract<T>(
 		return submitWithSession(
 			tx,
 			session,
-			{ server, networkPassphrase, relayer: nidoRelayer },
+			{
+				server,
+				networkPassphrase,
+				relayer: nidoRelayer,
+				local: nidoLocalSubmitter,
+			},
 			onStage,
 		)
 	if (StellarWalletsKit.selectedModule.productId !== NIDO_ID) {

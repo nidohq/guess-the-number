@@ -12,6 +12,22 @@ takes one device passkey prompt and no Nido page. A wrong guess costs 1 XLM, so
 two go through and the account refuses the third before anything is sent.
 Testnet only.
 
+> **This branch is a preview, not for merging.** It points the app at Nido's
+> preview wallet https://356.test.nido.fyi
+> ([nidohq/nido#356](https://github.com/nidohq/nido/pull/356)), which runs the
+> M7 Perch stack as a separate testnet deployment (Nido factory
+> `CC32RVTK6YS4ZPJ6JDHLO5LMFILW2BPS3SAYX5TABN4GJJY5QXNMCMU4`). Like that wallet,
+> it sends no transaction through Nido's relayer: session calls go out from a
+> key the browser keeps, funded by testnet Friendbot. The game contract is the
+> same pinned deployment. The live site still runs `main`; run this branch
+> locally (below), and create its Nido account on the preview, in the same
+> browser: an invitation link, or
+> `https://356.test.nido.fyi/new-account/?setup=1#salt=<64 hex>` (for example
+> from `openssl rand -hex 32`). The preview keeps each app's rules in a scope
+> for the app's origin, and the app reads them there first: the rules the
+> account enforces (`scope_rule_set`), since an M7 account keeps no scoped
+> document text.
+
 > Until 2026-10-24 the site used Nido's preview of
 > [nidohq/nido#318](https://github.com/nidohq/nido/pull/318); it now uses
 > https://test.nido.fyi. A Nido account made on the preview does not open on

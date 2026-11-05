@@ -47,10 +47,12 @@ deployment. To try the sample in the checkout itself, run the same commands from
 
 Then open the app at `http://localhost:<PORT>` (passkeys need a host name, so
 not `127.0.0.1`), press Connect and choose Nido. Without a Nido account yet,
-create one at https://test.nido.fyi: one passkey, and it arrives with 5 test
-XLM. Back in the app, your device makes a passkey for the app, and Nido asks you
-once, in a popup, to approve what that passkey may do. After that, each call
-asks your device for the app's passkey and nothing else: no Nido page.
+create one at https://356.test.nido.fyi, the M7 preview wallet this branch uses
+(an invitation link, or `/new-account/?setup=1#salt=<64 hex>`): one passkey, and
+Friendbot funds it. Back in the app, your device makes a passkey for the app,
+and Nido asks you once, in a popup, to approve what that passkey may do. After
+that, each call asks your device for the app's passkey and nothing else: no Nido
+page.
 
 In the sample, each wrong guess sends 1 XLM to the game. The session you approve
 lets the game's passkey call `guess` and spend up to 2 XLM a day from your
@@ -154,9 +156,11 @@ Everything here comes from `@stellar-scaffold/app-lib` (the template's
   popup during the click, builds the call with a transaction source a C-address
   can use, submits it, and resolves with `{ result, hash }` once confirmed:
   through the connected wallet for a G-address, signed by this app's passkey
-  (one device prompt) and submitted by Nido's relayer for a Nido account with a
-  session, otherwise through Nido's popup. The parts are exported too, for your
-  own flow: `reserveSigningPopup`, `transactionSource`, `submitContract`.
+  (one device prompt) and submitted from a Friendbot-funded key in the browser
+  (or by Nido's relayer with `PUBLIC_NIDO_LOCAL_SUBMITTER=0`) for a Nido account
+  with a session, otherwise through Nido's popup. The parts are exported too,
+  for your own flow: `reserveSigningPopup`, `transactionSource`,
+  `submitContract`.
 - A call takes several seconds, so say what it waits for: pass
   `{ onStage: setStage }` as `submitCall`'s third argument and render
   `<Pending>{stageText[stage]}</Pending>` (`app/src/components/Pending.tsx`)
@@ -172,9 +176,10 @@ Everything here comes from `@stellar-scaffold/app-lib` (the template's
   buttons and inputs wait.
 - `describe(error, contractErrors)` turns failures into sentences: the account's
   refusals (#3221 over the cap; #3002 or #3016 no rule covers the call, or it
-  expired; #3014 a contract in the call has no rule), Nido's relayer codes, and
-  your contract's `Error(Contract, #n)` looked up in `contractErrors` (the
-  generated client's `Errors`, or your own table).
+  expired; #3014 a contract in the call has no rule; an M6 or M7 account answers
+  any of those with #5 from `__check_auth`), Nido's relayer codes, and your
+  contract's `Error(Contract, #n)` looked up in `contractErrors` (the generated
+  client's `Errors`, or your own table).
 - `isOverCap(error)` is true when a call was refused for going over a grant's
   cap (#3221), so you can say what the cap was and when to come back. The app
   reads the cap's record first: a call that would go over stops before the
@@ -197,18 +202,21 @@ passkey:
 1. The device makes a passkey for the app, on the app's own origin
    (`createAppPasskey`). The app keeps its public key and credential id; the
    private key never leaves the device.
-2. The owner opens `https://<account>.test.nido.fyi/security/delegate-doc/` in a
-   popup, with every grant the screen needs and the app's public key
+2. The owner opens `https://<account>--356.test.nido.fyi/security/delegate-doc/`
+   in a popup, with every grant the screen needs and the app's public key
    (`pubkey=`). Nido shows each rule, the owner confirms once with their own
-   passkey, and Nido applies the updated policy document (`apply_doc`) through
-   its relayer. The rules name the app's passkey as an `External` signer,
-   checked by the same WebAuthn verifier as the owner's.
+   passkey, and Nido applies the app's rules in a scoped document for the app's
+   origin (`apply_scope`); the M7 preview submits it from a Friendbot-funded key
+   in the wallet's origin. The rules name the app's passkey as an `External`
+   signer, checked by the same WebAuthn verifier as the owner's.
 3. For each later call the app asks the device to sign the account's auth entry
    with its passkey (one prompt), naming the approved rule for each call: on
-   that contract, allowing that function (from the account's policy document),
-   and one of this app's own grants when another rule on the same contract names
-   the same passkey. The account checks the signature, the rules and the cap in
-   a simulation, then Nido's relayer submits the call and pays the fee.
+   that contract, allowing that function (from the origin's scoped document, or
+   the account's policy document for a grant made before scopes), and one of
+   this app's own grants when another rule on the same contract names the same
+   passkey. The account checks the signature, the rules and the cap in a
+   simulation, then a Friendbot-funded key in this browser submits the call and
+   pays the fee.
 
 The rules that follow from it:
 
@@ -246,8 +254,11 @@ The rules that follow from it:
   it" makes this browser forget the app's passkey (the device may still list
   it); approving again makes a new passkey and replaces the rules, so the old
   one stops working.
-- **Nido's relayer submits session calls** and pays their fees out of its shared
-  budget, as it does for account creation and grants.
+- **A key in this browser submits session calls** and pays their fees
+  (`app-lib/localSubmitter.ts`): funded by testnet Friendbot, it can pay fees
+  and nothing else, as the account's rules name the app's passkey. With
+  `PUBLIC_NIDO_LOCAL_SUBMITTER=0`, Nido's relayer does, out of its shared
+  budget.
 
 Some patterns that work:
 
@@ -268,12 +279,15 @@ Some patterns that work:
 
 ## When Nido's relayer says no
 
-Nido's relayer pays for creating accounts, applying grants and submitting
-session calls, out of one budget shared by everyone on testnet (100 XLM a day,
-counted by the fee bid). Measured on 2026-10-22: an account costs about 1.4 XLM,
-a first grant about 4.5 XLM (it writes the policy document), a capped grant
-about 2.7 XLM. On 2026-10-23 a guess cost 0.56 XLM the first time (the cap's
-first write) and 0.035 XLM after that.
+The M7 preview wallet this branch uses (https://356.test.nido.fyi) and this
+app's session calls (`PUBLIC_NIDO_LOCAL_SUBMITTER=1`) never call the relayer:
+Friendbot-funded keys in the browser pay instead. Elsewhere, Nido's relayer pays
+for creating accounts, applying grants and submitting session calls, out of one
+budget shared by everyone on testnet (100 XLM a day, counted by the fee bid).
+Measured on 2026-10-22: an account costs about 1.4 XLM, a first grant about 4.5
+XLM (it writes the policy document), a capped grant about 2.7 XLM. On 2026-10-23
+a guess cost 0.56 XLM the first time (the cap's first write) and 0.035 XLM after
+that.
 
 When the budget runs out, or the relayer is busy or slow, Nido's grant page
 currently says "We couldn't confirm what happened to this transaction on-chain…
@@ -320,7 +334,7 @@ ID.
 For the real thing without a person, `npm run test-browser` starts a throwaway
 Chrome whose every tab and popup has a virtual passkey (the app's passkey is a
 virtual one too), and prints the settings for a browser driver such as
-chrome-devtools-axi. Create the account at https://test.nido.fyi in that
+chrome-devtools-axi. Create the account at https://356.test.nido.fyi in that
 browser. To try a Nido preview, set `PUBLIC_NIDO_BASE` in `app/.env`, e.g.
 `https://<PR number>.test.nido.fyi`.
 
@@ -369,10 +383,10 @@ pricing, 3.3 and 0.2 XLM, and the approval 44 XLM.
   accounts report `oz_rule_ids`); the unit tests pin it to Perch's auth vectors.
   `npm run link-clients` keeps generated clients on app-lib's copy of
   `@stellar/stellar-sdk`.
-- Session calls go to Nido's relayer at `https://nido.fly.dev`; set
-  `PUBLIC_NIDO_RELAYER` in `app/.env` for another. The grant request leaves out
-  `credential_id`: Perch's document compiler refuses a WebAuthn key with the id
-  appended (`#7`, `KeyNotCanonicalizable`).
+- With `PUBLIC_NIDO_LOCAL_SUBMITTER=0`, session calls go to Nido's relayer at
+  `https://nido.fly.dev`; set `PUBLIC_NIDO_RELAYER` in `app/.env` for another.
+  The grant request leaves out `credential_id`: Perch's document compiler
+  refuses a WebAuthn key with the id appended (`#7`, `KeyNotCanonicalizable`).
 - Nido's `ADD-NIDO-TO-DAPP.md` and module README still say the dApp submits the
   signed XDR; for transactions the wallet now submits and returns a hash, which
   the app must not broadcast again.

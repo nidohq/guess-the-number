@@ -54,6 +54,9 @@ export default defineConfig({
 		// contract-watch process that needs Docker/network).
 		command: `npx vite --port ${t.port} --strictPort`,
 		cwd: t.cwd,
+		// The mocks stand in for Nido's relayer, so session calls go there
+		// rather than to a Friendbot-funded key in the browser
+		env: { PUBLIC_NIDO_LOCAL_SUBMITTER: "0" },
 		url: `http://localhost:${t.port}`,
 		reuseExistingServer: !process.env.CI,
 		timeout: 120_000,

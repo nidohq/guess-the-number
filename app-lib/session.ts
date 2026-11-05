@@ -15,7 +15,8 @@
 // device asks for it on every call, and its private key never leaves the
 // authenticator: the app keeps only the public key and the credential id, so
 // nothing in the browser can spend. A passkey-signed call is an ordinary
-// authorization entry, so Nido's relayer submits it and pays the fee.
+// authorization entry, so Nido's relayer submits it and pays the fee, or, in
+// local-submitter mode (`localSubmitter.ts`), a key in this browser does.
 //
 // One passkey per account and origin. The grants a gate needs go to Nido in
 // one request, which the owner approves with one confirmation. Nido replaces a
@@ -39,6 +40,7 @@ import {
 	scValToNative,
 	xdr,
 } from "@stellar/stellar-sdk"
+import { localSubmitter, submitLocally } from "./localSubmitter"
 
 export type GrantDuration = "24h" | "7d" | "30d"
 export type LimitPeriod = "day" | "week" | "30d"
@@ -959,12 +961,13 @@ async function read(
 	method: string,
 	server: rpc.Server,
 	networkPassphrase: string,
+	args: xdr.ScVal[] = [],
 ): Promise<{ value: unknown; latestLedger: number }> {
 	const tx = new TransactionBuilder(new Account(SIMULATION_SOURCE, "0"), {
 		fee: "100",
 		networkPassphrase,
 	})
-		.addOperation(new Contract(account).call(method))
+		.addOperation(new Contract(account).call(method, ...args))
 		.setTimeout(30)
 		.build()
 	const sim = await server.simulateTransaction(tx)
@@ -976,27 +979,156 @@ async function read(
 	}
 }
 
-/** Read the account's installed rules, with their functions and caps from
- * its policy document (`document()`: revision, canonical JSON as bytes). */
+/**
+ * Read the rules this app's passkey may sign under: those of the scoped
+ * document Nido keeps for this page's origin (`readScopedRules`), then the
+ * account's installed rules, with their functions and caps from its policy
+ * document (`document()`: revision, canonical JSON as bytes), where Nido
+ * put an app's grants before it kept them in a scope. The scope's come
+ * first, so its rule wins over an older one of the same name.
+ */
 export async function readRules(
 	account: string,
 	server: rpc.Server,
 	networkPassphrase: string,
+	origin = globalThis.location?.origin,
 ): Promise<{ rules: InstalledRule[]; latestLedger: number }> {
-	const [installed, written] = await Promise.all([
+	const [installed, written, scoped] = await Promise.all([
 		read(account, "installed_rules", server, networkPassphrase),
 		read(account, "document", server, networkPassphrase).catch(() => undefined),
+		origin
+			? readScopedRules(account, origin, server, networkPassphrase)
+			: Promise.resolve([]),
 	])
 	const bytes = Array.isArray(written?.value) ? written.value[1] : undefined
 	const json =
 		bytes instanceof Uint8Array ? new TextDecoder().decode(bytes) : undefined
 	return {
-		rules: parseRules(
-			installed.value as NativeRule[],
-			json ? (JSON.parse(json) as { rules: DocRule[] }) : undefined,
-		),
+		rules: [
+			...scoped,
+			...parseRules(
+				installed.value as NativeRule[],
+				json ? (JSON.parse(json) as { rules: DocRule[] }) : undefined,
+			),
+		],
 		latestLedger: installed.latestLedger,
 	}
+}
+
+/** How many scope ids Nido tries for one app origin. */
+const APP_SCOPE_CANDIDATES = 4
+const APP_SCOPE_DOMAIN = new TextEncoder().encode("nido/app-scope/v1")
+
+/** The scope ids Nido may keep `origin`'s rules under, in the order it tries
+ * them: the big-endian `u32` of the first four bytes of
+ * `sha256("nido/app-scope/v1" || 0 || origin || 0 || i)`. */
+export async function appScopeCandidates(origin: string): Promise<number[]> {
+	const o = new TextEncoder().encode(new URL(origin).origin)
+	return Promise.all(
+		Array.from({ length: APP_SCOPE_CANDIDATES }, async (_, i) => {
+			const digest = await sha256(
+				concat(APP_SCOPE_DOMAIN, Uint8Array.of(0), o, Uint8Array.of(0, i)),
+			)
+			return new DataView(digest.buffer).getUint32(0)
+		}),
+	)
+}
+
+/** A rule-eval rule as `scope_rule_set(id)` gives it (`scValToNative`
+ * form): what `__check_auth` enforces for one rule of a scoped document. */
+type StoredRule = {
+	contract: string
+	/** `Only(names)` or `AnyExcept(names)`. */
+	functions: unknown
+	/** `ArgEq(index, value)`, `ArgI128AtMost(index, bound)`, … */
+	conds: unknown[]
+	/** Zero or one cap. */
+	cap: { limit: bigint; period: number }[]
+}
+
+/** The document rule `stored` enforces, in the parts this app reads: its
+ * functions, its cap, and the `address-eq` on a transfer's `to`. */
+function storedDocRule(name: string, stored: StoredRule): DocRule {
+	const [kind, names] = variant(stored.functions) ?? []
+	const listed = Array.isArray(names) ? names.map(String) : []
+	const to = stored.conds
+		.map(variant)
+		.find((c) => c?.[0] === "ArgEq" && Number(c[1]) === 1)
+	const address = variant(to?.[2])
+	const cap = stored.cap[0]
+	return {
+		name,
+		scope: { type: "contract", address: String(stored.contract) },
+		// `AnyExcept([])` is every function; a scoped document has no other
+		// `AnyExcept`, so one that names functions is left uncallable here
+		functions: kind === "Only" ? listed : listed.length ? [] : undefined,
+		...(address?.[0] === "Address"
+			? {
+					args: [
+						{
+							index: 1,
+							pred: { type: "address-eq", address: String(address[1]) },
+						},
+					],
+				}
+			: {}),
+		...(cap
+			? {
+					cap: {
+						limit: String(cap.limit),
+						"period-ledgers": Number(cap.period),
+					},
+				}
+			: {}),
+	}
+}
+
+/**
+ * The rules of `origin`'s scoped document on a Perch account that keeps
+ * them (`apply_scope`, the M7 stack): the first candidate scope whose every
+ * signer id (`scope_signer_ids(id)`) is `<origin>#<8 hex>`. `scope(id)`
+ * gives its installed rules, apart from `installed_rules`, and
+ * `scope_rule_set(id)`, aligned with them, the rule-eval rules the account
+ * enforces for them: their functions, caps and recipients. The account
+ * keeps no document text. None when the account keeps no scopes, no
+ * candidate is the origin's, or a recovery has wiped it (its rules
+ * authorize nothing).
+ */
+async function readScopedRules(
+	account: string,
+	origin: string,
+	server: rpc.Server,
+	networkPassphrase: string,
+): Promise<InstalledRule[]> {
+	const call = async (method: string, args: xdr.ScVal[] = []) =>
+		(await read(account, method, server, networkPassphrase, args)).value
+	const generation = await call("scope_generation").catch(() => undefined)
+	if (generation === undefined) return []
+	const o = new URL(origin).origin
+	const own = (signer: string) =>
+		signer.startsWith(`${o}#`) &&
+		/^[0-9a-f]{8}$/.test(signer.slice(o.length + 1))
+	for (const id of await appScopeCandidates(origin)) {
+		const scope = [xdr.ScVal.scvU32(id)]
+		const [record, signerIds, ruleSet] = (await Promise.all([
+			call("scope", scope),
+			call("scope_signer_ids", scope),
+			call("scope_rule_set", scope),
+		])) as [
+			{ gen: bigint; rules: NativeRule[] } | null,
+			string[] | null,
+			StoredRule[],
+		]
+		if (!record || !signerIds?.length) continue
+		if (!signerIds.every((s) => own(String(s)))) continue
+		if (BigInt(record.gen) !== BigInt(generation as bigint)) return []
+		return parseRules(record.rules, {
+			rules: record.rules.flatMap((rule, i) =>
+				ruleSet[i] ? [storedDocRule(String(rule.name), ruleSet[i])] : [],
+			),
+		})
+	}
+	return []
 }
 
 /** A cap's recent spending, as its `spending_limit` policy stores it. */
@@ -1008,12 +1140,15 @@ export interface CapWindow {
 
 /** The spending window of `rule`'s cap on `account`, read from its policy's
  * storage (`AccountContext(account, rule id)`); `undefined` before the first
- * spend. */
+ * spend. A Perch account on rule-eval (the M6 and M7 stacks) attaches no
+ * policy to a document rule and keeps the window itself
+ * (`readOwnCapWindow`). */
 async function readCapWindow(
 	account: string,
 	rule: InstalledRule,
 	server: rpc.Server,
 ): Promise<CapWindow | undefined> {
+	if (!rule.policies.length) return readOwnCapWindow(account, rule, server)
 	const key = xdr.ScVal.scvVec([
 		xdr.ScVal.scvSymbol("AccountContext"),
 		new Address(account).toScVal(),
@@ -1043,6 +1178,42 @@ async function readCapWindow(
 		spent: data.spending_history.map((e) => ({
 			amount: BigInt(e.amount),
 			ledger: Number(e.ledger_sequence),
+		})),
+	}
+}
+
+/** The spending window an M6 or M7 account keeps for a capped rule in its
+ * own storage (`SpendRecords(rule id)`: the spends still in the window),
+ * with the rule's cap. */
+async function readOwnCapWindow(
+	account: string,
+	rule: InstalledRule,
+	server: rpc.Server,
+): Promise<CapWindow | undefined> {
+	if (!rule.cap) return undefined
+	const { entries } = await server.getLedgerEntries(
+		xdr.LedgerKey.contractData(
+			new xdr.LedgerKeyContractData({
+				contract: new Address(account).toScAddress(),
+				key: xdr.ScVal.scvVec([
+					xdr.ScVal.scvSymbol("SpendRecords"),
+					xdr.ScVal.scvU32(rule.id),
+				]),
+				durability: xdr.ContractDataDurability.persistent(),
+			}),
+		),
+	)
+	const entry = entries[0]
+	if (!entry) return undefined
+	const data = scValToNative(entry.val.contractData().val()) as {
+		history: { amount: bigint; ledger: number }[]
+	}
+	return {
+		limit: rule.cap.limit,
+		periodLedgers: rule.cap.periodLedgers,
+		spent: data.history.map((e) => ({
+			amount: BigInt(e.amount),
+			ledger: Number(e.ledger),
 		})),
 	}
 }
@@ -1142,8 +1313,17 @@ export function isOverCap(error: unknown): boolean {
 	return message.includes("#3221") || message.includes(OVER_CAP)
 }
 
+/** A Perch account on rule-eval (the M6 and M7 stacks) refuses an
+ * authorization its rules don't allow with its own `RuleEvalRefused`, #5,
+ * where OZ answered #3002, #3014 or #3221: over a cap, no covering rule, or
+ * an expired one. */
+const RULE_EVAL_REFUSED =
+	/Error\(Contract, #5\)[\s\S]*__check_auth|__check_auth[\s\S]*Error\(Contract, #5\)/
+
 function accountRefusal(message: string): string | undefined {
 	if (message.includes("#3221")) return OVER_CAP
+	if (RULE_EVAL_REFUSED.test(message))
+		return "Your account refused: no approved rule allows this call for this app (it may be over the spending cap, or expired)."
 	if (message.includes("#3002") || message.includes("#3016"))
 		return "Your account refused: no approved rule covers this call for this app (it may have expired)."
 	if (message.includes("#3014"))
@@ -1264,18 +1444,25 @@ async function relay(
 
 /**
  * Sign `tx`'s call with this app's passkey under the account's approved
- * rules (the device asks once), hand it to Nido's relayer, and return the
- * confirmed result. The account checks the signature, the rules and any cap
- * in a simulation first, so a refused call is never sent and costs nothing.
+ * rules (the device asks once), hand it to Nido's relayer (or, with `local`,
+ * submit it from this browser's own key), and return the confirmed result.
+ * The account checks the signature, the rules and any cap in a simulation
+ * first, so a refused call is never sent and costs nothing.
  * `onStage` hears `passkey`, `sending` and `confirming` as they start.
  */
 export async function submitWithSession<T>(
 	tx: contract.AssembledTransaction<T>,
 	session: Session,
-	network: { server: rpc.Server; networkPassphrase: string; relayer: string },
+	network: {
+		server: rpc.Server
+		networkPassphrase: string
+		relayer: string
+		/** Local-submitter mode: no relayer (see `localSubmitter.ts`). */
+		local?: boolean
+	},
 	onStage?: (stage: SubmitStage) => void,
 ): Promise<{ result: T; hash: string }> {
-	const { server, networkPassphrase, relayer } = network
+	const { server, networkPassphrase, relayer, local } = network
 	if (!tx.built) throw new Error("Simulate the call before submitting it")
 	const op = tx.built.operations[0]
 	if (op?.type !== "invokeHostFunction")
@@ -1332,7 +1519,11 @@ export async function submitWithSession<T>(
 	}
 
 	onStage?.("sending")
-	const signed = new TransactionBuilder(new Account(SIMULATION_SOURCE, "0"), {
+	const key = local ? await localSubmitter(server) : undefined
+	const source = key
+		? await server.getAccount(key.publicKey())
+		: new Account(SIMULATION_SOURCE, "0")
+	const signed = new TransactionBuilder(source, {
 		fee: "100",
 		networkPassphrase,
 	})
@@ -1346,7 +1537,10 @@ export async function submitWithSession<T>(
 	)
 	if (!rpc.Api.isSimulationSuccess(enforced))
 		throw new Error(explainRefusal(enforced.error))
-	const txHash = await relay(relayer, op.func, auth, onStage)
+	const txHash = key
+		? await submitLocally(signed, enforced, key, server)
+		: await relay(relayer, op.func, auth, onStage)
+	if (key) onStage?.("confirming")
 	const done = await server.pollTransaction(txHash, { attempts: 30 })
 	if (done.status !== rpc.Api.GetTransactionStatus.SUCCESS)
 		throw new Error(`Transaction ${txHash} ${done.status.toLowerCase()}`)

@@ -245,7 +245,7 @@ if (deployerAddress) {
 		)
 }
 
-const nidoBase = "https://test.nido.fyi"
+const nidoBase = "https://356.test.nido.fyi"
 const nido = await get(`${nidoBase}/`)
 check(
 	"nido",

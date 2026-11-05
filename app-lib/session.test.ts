@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import {
 	Account,
 	Address,
+	Keypair,
 	Networks,
 	Operation,
 	StrKey,
@@ -16,6 +17,7 @@ import {
 } from "@stellar/stellar-sdk"
 import {
 	activeSession,
+	appScopeCandidates,
 	authContexts,
 	authDigest,
 	authPayload,
@@ -32,6 +34,7 @@ import {
 	loadSession,
 	parseRules,
 	passkeySigners,
+	readRules,
 	requestSession,
 	resumeSession,
 	ruleIdsFor,
@@ -44,6 +47,13 @@ import {
 	type Session,
 	type SessionPasskey,
 } from "./session"
+import { localSubmitter, submitLocally } from "./localSubmitter"
+
+// Local-submitter mode's key and RPC submission, which a test stands in for
+vi.mock("./localSubmitter", () => ({
+	localSubmitter: vi.fn(),
+	submitLocally: vi.fn(),
+}))
 
 const account = StrKey.encodeContract(Buffer.alloc(32, 1))
 const sac = StrKey.encodeContract(Buffer.alloc(32, 2))
@@ -657,6 +667,194 @@ const installed = (
 		{ type: { id: ["symbol", null] } },
 	)
 
+describe("an app's scoped document", () => {
+	const origin = "http://localhost:5542"
+	const scopeId = (o: string, i: number) =>
+		createHash("sha256")
+			.update(
+				Buffer.concat([
+					Buffer.from("nido/app-scope/v1"),
+					Buffer.from([0]),
+					Buffer.from(o),
+					Buffer.from([0, i]),
+				]),
+			)
+			.digest()
+			.readUInt32BE(0)
+
+	it("tries the ids Nido derives from the origin, in order", async () => {
+		expect(await appScopeCandidates(origin)).toEqual(
+			[0, 1, 2, 3].map((i) => scopeId(origin, i)),
+		)
+		// The origin's serialization: no path, no default port
+		expect(await appScopeCandidates("https://app.example:443/play")).toEqual(
+			await appScopeCandidates("https://app.example"),
+		)
+	})
+
+	/** A rule-eval rule as `scope_rule_set` stores it: `guess` on the game,
+	 * or a `transfer` of the token capped at `limit` and paying only the
+	 * game. */
+	const stored = (limit?: bigint) =>
+		nativeToScVal({
+			cap: xdr.ScVal.scvVec(
+				limit === undefined
+					? []
+					: [
+							nativeToScVal({
+								amount_arg: nativeToScVal(2, { type: "u32" }),
+								limit: nativeToScVal(limit, { type: "i128" }),
+								period: nativeToScVal(17_280, { type: "u32" }),
+							}),
+						],
+			),
+			conds: xdr.ScVal.scvVec(
+				limit === undefined
+					? []
+					: [
+							xdr.ScVal.scvVec([
+								xdr.ScVal.scvSymbol("ArgEq"),
+								xdr.ScVal.scvU32(1),
+								xdr.ScVal.scvVec([
+									xdr.ScVal.scvSymbol("Address"),
+									new Address(app).toScVal(),
+								]),
+							]),
+							xdr.ScVal.scvVec([
+								xdr.ScVal.scvSymbol("ArgI128AtMost"),
+								xdr.ScVal.scvU32(2),
+								nativeToScVal((1n << 127n) - 1n, { type: "i128" }),
+							]),
+						],
+			),
+			contract: new Address(limit === undefined ? app : sac).toScVal(),
+			functions: xdr.ScVal.scvVec([
+				xdr.ScVal.scvSymbol("Only"),
+				xdr.ScVal.scvVec([
+					xdr.ScVal.scvSymbol(limit === undefined ? "guess" : "transfer"),
+				]),
+			]),
+		})
+
+	/** An account whose candidate 0 holds `first`'s scope and candidate 1
+	 * holds `second`'s, each with a `guess` rule and a capped `pay` rule (OZ
+	 * ids 7 and 8, then 9 and 10), beside an older `guess` rule in the admin
+	 * document (id 2). */
+	const scopedAccount = (first: string, second: string, gen = 1n) => {
+		const scopes = new Map(
+			[first, second].map((o, i) => [
+				scopeId(origin, i),
+				{ signer: `${o}#0123abcd`, ruleIds: [7 + 2 * i, 8 + 2 * i] },
+			]),
+		)
+		const arg = (tx: { operations: Operation.InvokeHostFunction[] }) =>
+			tx.operations[0]!.func.invokeContract().args()[0]
+		return {
+			simulateTransaction: vi.fn(
+				async (tx: { operations: Operation.InvokeHostFunction[] }) => {
+					const method = tx.operations[0]!.func.invokeContract()
+						.functionName()
+						.toString()
+					const scope = () => scopes.get(arg(tx)!.u32())
+					switch (method) {
+						case "installed_rules":
+							return simulated(
+								installed([
+									{ id: 2, name: "guess", contract: app, key: keyData },
+								]),
+							)
+						case "scope_generation":
+							return simulated(nativeToScVal(gen, { type: "u64" }))
+						case "scope":
+							return simulated(
+								scope()
+									? nativeToScVal(
+											{
+												doc_hash: nativeToScVal(Buffer.alloc(32)),
+												gen: nativeToScVal(1n, { type: "u64" }),
+												rules: installed([
+													{
+														id: scope()!.ruleIds[0]!,
+														name: "guess",
+														contract: app,
+														key: keyData,
+													},
+													{
+														id: scope()!.ruleIds[1]!,
+														name: "pay",
+														contract: sac,
+														key: keyData,
+													},
+												]),
+											},
+											{ type: { doc_hash: ["symbol", null] } },
+										)
+									: xdr.ScVal.scvVoid(),
+							)
+						case "scope_signer_ids":
+							return simulated(
+								scope()
+									? nativeToScVal([scope()!.signer], {
+											type: ["string"],
+										})
+									: xdr.ScVal.scvVoid(),
+							)
+						case "scope_rule_set":
+							return simulated(
+								xdr.ScVal.scvVec(
+									scope() ? [stored(), stored(2n * 10n ** 7n)] : [],
+								),
+							)
+						default:
+							return { latestLedger: 1_000, error: "no document" }
+					}
+				},
+			),
+		} as unknown as rpc.Server
+	}
+
+	it("reads the origin's scope first, skipping another origin's", async () => {
+		const server = scopedAccount("https://other.example", origin)
+		const { rules } = await readRules(account, server, Networks.TESTNET, origin)
+		expect(rules.map((r) => [r.id, r.name, r.functions])).toEqual([
+			[9, "guess", ["guess"]],
+			[10, "pay", ["transfer"]],
+			[2, "guess", undefined],
+		])
+		expect(rules[0]).toMatchObject({ contract: app, policies: [] })
+		// The cap and the one recipient come from the rule the account enforces
+		expect(rules[1]).toMatchObject({
+			contract: sac,
+			cap: { limit: 2n * 10n ** 7n, periodLedgers: 17_280 },
+			to: app,
+		})
+		// The scope's rule wins over the admin document's of the same name
+		expect(
+			ruleIdsFor(
+				[{ contract: app, fn: "guess", args: [] }],
+				rules,
+				passkey,
+				1_000,
+				["guess"],
+			),
+		).toEqual([9])
+	})
+	it("leaves out a scope a recovery wiped, and works without an origin", async () => {
+		const wiped = scopedAccount(origin, "https://other.example", 2n)
+		expect(
+			(await readRules(account, wiped, Networks.TESTNET, origin)).rules.map(
+				(r) => r.id,
+			),
+		).toEqual([2])
+		const server = scopedAccount(origin, "https://other.example")
+		expect(
+			(await readRules(account, server, Networks.TESTNET, undefined)).rules.map(
+				(r) => r.id,
+			),
+		).toEqual([2])
+	})
+})
+
 describe("checking the chain for what landed", () => {
 	it("counts a grant that names a recipient only when the rule pays that address", async () => {
 		const server = (args: object[] | undefined) =>
@@ -943,214 +1141,301 @@ describe("a call signed by the app's passkey", () => {
 			}),
 		).toEqual(signer!.val().bytes())
 	})
-	it("refuses over the cap before the device is asked, and remembers until when", async () => {
+	it("submits from this browser's own key in local-submitter mode, not the relayer", async () => {
 		vi.stubGlobal("window", { location: { hostname: "localhost" } })
 		const { get } = authenticator()
-		const policy = StrKey.encodeContract(Buffer.alloc(32, 7))
-		const doc = JSON.stringify({
-			rules: [
-				{
-					name: "play",
-					functions: ["guess"],
-					scope: { type: "contract", address: app },
-				},
-				{
-					name: "spend",
-					functions: ["transfer"],
-					cap: { limit: "20000000", "period-ledgers": 17280 },
-					scope: { type: "contract", address: sac },
-				},
-			],
-		})
-		// Two 1 XLM guesses already in today's window
-		let spent = [
-			{ amount: 10_000_000n, ledger: 900 },
-			{ amount: 10_000_000n, ledger: 950 },
-		]
-		const window = () =>
-			nativeToScVal(
-				{
-					cached_total_spent: nativeToScVal(
-						spent.reduce((a, e) => a + e.amount, 0n),
-						{ type: "i128" },
-					),
-					period_ledgers: nativeToScVal(17_280, { type: "u32" }),
-					spending_history: xdr.ScVal.scvVec(
-						spent.map((e) =>
-							nativeToScVal(
-								{
-									amount: nativeToScVal(e.amount, { type: "i128" }),
-									ledger_sequence: nativeToScVal(e.ledger, { type: "u32" }),
-								},
-								{
-									type: {
-										amount: ["symbol", null],
-										ledger_sequence: ["symbol", null],
-									},
-								},
-							),
-						),
-					),
-					spending_limit: nativeToScVal(20_000_000n, { type: "i128" }),
-				},
-				{
-					type: {
-						cached_total_spent: ["symbol", null],
-						period_ledgers: ["symbol", null],
-						spending_history: ["symbol", null],
-						spending_limit: ["symbol", null],
-					},
-				},
-			)
-		const keys: xdr.LedgerKey[] = []
-		const { server, relayed } = network()
-		const reads = server.simulateTransaction as unknown as ReturnType<
-			typeof vi.fn
-		>
-		const original = reads.getMockImplementation() as (
-			...args: unknown[]
-		) => Promise<unknown>
-		reads.mockImplementation(
-			async (
-				tx: { operations: Operation.InvokeHostFunction[] },
-				l: unknown,
-				mode?: string,
-			) => {
-				const method = tx.operations[0]!.func.invokeContract()
-					.functionName()
-					.toString()
-				if (method === "document")
-					return simulated(
-						xdr.ScVal.scvVec([
-							nativeToScVal(1, { type: "u64" }),
-							nativeToScVal(Buffer.from(doc)),
-						]),
-					)
-				if (method === "installed_rules")
-					return simulated(
-						nativeToScVal(
-							[
-								{ id: 2, name: "play", target: app, policies: [] },
-								{ id: 3, name: "spend", target: sac, policies: [policy] },
-							].map(({ id, name, target, policies }) => ({
-								context_type: xdr.ScVal.scvVec([
-									xdr.ScVal.scvSymbol("CallContract"),
-									new Address(target).toScVal(),
-								]),
-								id: nativeToScVal(id, { type: "u32" }),
-								name,
-								policies: xdr.ScVal.scvVec(
-									policies.map((p) =>
-										nativeToScVal(
-											{ policy: new Address(p).toScVal() },
-											{ type: { policy: ["symbol", null] } },
-										),
-									),
-								),
-								signers: xdr.ScVal.scvVec([
-									xdr.ScVal.scvVec([
-										xdr.ScVal.scvSymbol("External"),
-										new Address(verifier).toScVal(),
-										nativeToScVal(Buffer.from(keyData, "hex")),
-									]),
-								]),
-								valid_until: nativeToScVal(1_720, { type: "u32" }),
-							})),
-							{ type: { id: ["symbol", null] } },
-						),
-					)
-				return original(tx, l, mode)
-			},
-		)
+		const { server, modes, relayed } = network()
+		const key = Keypair.random()
+		vi.mocked(localSubmitter).mockResolvedValue(key)
+		vi.mocked(submitLocally).mockResolvedValue(txHash)
 		Object.assign(server, {
-			getLedgerEntries: vi.fn(async (...asked: xdr.LedgerKey[]) => {
-				keys.push(...asked)
-				return { entries: [{ val: { contractData: () => ({ val: window }) } }] }
-			}),
+			getAccount: vi.fn(async (id: string) => new Account(id, "41")),
 		})
-		// A losing guess: `guess` on the game, then 1 XLM to the game
-		const me = new Address(account).toScVal()
-		const fn = (
-			contract: string,
-			name: string,
-			args: xdr.ScVal[],
-			subs: xdr.SorobanAuthorizedInvocation[] = [],
-		) =>
-			new xdr.SorobanAuthorizedInvocation({
-				function:
-					xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(
-						new xdr.InvokeContractArgs({
-							contractAddress: new Address(contract).toScAddress(),
-							functionName: name,
-							args,
-						}),
-					),
-				subInvocations: subs,
-			})
-		const entry = new xdr.SorobanAuthorizationEntry({
-			credentials: recorded.credentials(),
-			rootInvocation: fn(
-				app,
-				"guess",
-				[nativeToScVal(3, { type: "u64" }), me],
-				[
-					fn(sac, "transfer", [
-						me,
-						new Address(app).toScVal(),
-						nativeToScVal(10_000_000n, { type: "i128" }),
-					]),
-				],
-			),
-		})
-		const guessing = {
-			...assembled,
-			built: new TransactionBuilder(
-				new Account(StrKey.encodeEd25519PublicKey(Buffer.alloc(32)), "0"),
-				{
-					fee: "100",
-					networkPassphrase: Networks.TESTNET,
-				},
-			)
-				.addOperation(Operation.invokeHostFunction({ func, auth: [entry] }))
-				.setTimeout(30)
-				.build(),
-		} as unknown as contract.AssembledTransaction<boolean>
-		store([
-			{ ...play, expiresAt: Date.now() + hour },
-			{ ...spend, expiresAt: Date.now() + hour },
-		])
-		const session = loadSession(account)!
-		const submit = () =>
-			submitWithSession(guessing, loadSession(account)!, {
+		const stages: string[] = []
+		const result = await submitWithSession(
+			assembled,
+			{ account, passkey, grants: [] },
+			{
 				server,
 				networkPassphrase: Networks.TESTNET,
 				relayer: "https://relay",
-			})
-
-		const refusal = await submit().catch((e: unknown) => e)
-		expect(refusal).toBeInstanceOf(CapReachedError)
-		expect(isOverCap(refusal)).toBe(true)
-		expect(get).not.toHaveBeenCalled()
-		expect(relayed).toHaveLength(0)
-		// The cap's own record, keyed by account and the XLM rule's id
-		const [key] = keys.map((k) => k.contractData())
-		expect(Address.fromScAddress(key!.contract()).toString()).toBe(policy)
-		expect(scValToNative(key!.key())).toEqual(["AccountContext", account, 3])
-		// Free again once the 900 spend is a day old: 17,180 ledgers from 1,000
-		const until = (refusal as CapReachedError).until!
-		expect(Math.round((until - Date.now()) / 60_000)).toBe(
-			Math.round((17_180 * 5) / 60),
+				local: true,
+			},
+			(stage) => stages.push(stage),
 		)
-		expect(capReachedUntil(account, [play, spend])).toBe(until)
-		expect(capReachedUntil(account, [play])).toBeUndefined()
-
-		// A guess that fits clears it
-		spent = []
-		await submit()
+		expect(result).toEqual({ result: false, hash: txHash })
+		expect(stages).toEqual(["passkey", "sending", "confirming"])
 		expect(get).toHaveBeenCalledOnce()
-		expect(capReachedUntil(account, [spend])).toBeUndefined()
-		expect(session.passkey).toEqual(passkey)
+		expect(relayed).toHaveLength(0)
+		// The key is the source of the call the account's rules checked,
+		// with the passkey's signed entry, simulated in enforcing mode
+		const [tx, simulation, signer] = vi.mocked(submitLocally).mock.calls[0]!
+		expect(tx.source).toBe(key.publicKey())
+		expect(tx.sequence).toBe("42")
+		expect(modes.at(-1)).toBe("enforce")
+		expect(simulation).toMatchObject({
+			result: { retval: nativeToScVal(false) },
+		})
+		expect(signer).toBe(key)
+		const op = tx.operations[0] as Operation.InvokeHostFunction
+		expect(op.func.toXDR("base64")).toBe(func.toXDR("base64"))
+		expect(op.auth![0]!.credentials().address().signature().switch().name).toBe(
+			"scvMap",
+		)
 	})
+	// A Perch account on rule-eval (the M6 stack) attaches no policy to the
+	// rule and keeps the cap's window in its own storage
+	it.each([{ m6: false }, { m6: true }])(
+		"refuses over the cap before the device is asked, and remembers until when (M6 account: $m6)",
+		async ({ m6 }) => {
+			vi.stubGlobal("window", { location: { hostname: "localhost" } })
+			const { get } = authenticator()
+			const policy = StrKey.encodeContract(Buffer.alloc(32, 7))
+			const doc = JSON.stringify({
+				rules: [
+					{
+						name: "play",
+						functions: ["guess"],
+						scope: { type: "contract", address: app },
+					},
+					{
+						name: "spend",
+						functions: ["transfer"],
+						cap: { limit: "20000000", "period-ledgers": 17280 },
+						scope: { type: "contract", address: sac },
+					},
+				],
+			})
+			// Two 1 XLM guesses already in today's window
+			let spent = [
+				{ amount: 10_000_000n, ledger: 900 },
+				{ amount: 10_000_000n, ledger: 950 },
+			]
+			const window = () =>
+				nativeToScVal(
+					{
+						cached_total_spent: nativeToScVal(
+							spent.reduce((a, e) => a + e.amount, 0n),
+							{ type: "i128" },
+						),
+						period_ledgers: nativeToScVal(17_280, { type: "u32" }),
+						spending_history: xdr.ScVal.scvVec(
+							spent.map((e) =>
+								nativeToScVal(
+									{
+										amount: nativeToScVal(e.amount, { type: "i128" }),
+										ledger_sequence: nativeToScVal(e.ledger, { type: "u32" }),
+									},
+									{
+										type: {
+											amount: ["symbol", null],
+											ledger_sequence: ["symbol", null],
+										},
+									},
+								),
+							),
+						),
+						spending_limit: nativeToScVal(20_000_000n, { type: "i128" }),
+					},
+					{
+						type: {
+							cached_total_spent: ["symbol", null],
+							period_ledgers: ["symbol", null],
+							spending_history: ["symbol", null],
+							spending_limit: ["symbol", null],
+						},
+					},
+				)
+			const record = () =>
+				nativeToScVal(
+					{
+						history: xdr.ScVal.scvVec(
+							spent.map((e) =>
+								nativeToScVal(
+									{
+										amount: nativeToScVal(e.amount, { type: "i128" }),
+										ledger: nativeToScVal(e.ledger, { type: "u32" }),
+									},
+									{
+										type: {
+											amount: ["symbol", null],
+											ledger: ["symbol", null],
+										},
+									},
+								),
+							),
+						),
+						total: nativeToScVal(
+							spent.reduce((a, e) => a + e.amount, 0n),
+							{ type: "i128" },
+						),
+					},
+					{ type: { history: ["symbol", null], total: ["symbol", null] } },
+				)
+			const keys: xdr.LedgerKey[] = []
+			const { server, relayed } = network()
+			const reads = server.simulateTransaction as unknown as ReturnType<
+				typeof vi.fn
+			>
+			const original = reads.getMockImplementation() as (
+				...args: unknown[]
+			) => Promise<unknown>
+			reads.mockImplementation(
+				async (
+					tx: { operations: Operation.InvokeHostFunction[] },
+					l: unknown,
+					mode?: string,
+				) => {
+					const method = tx.operations[0]!.func.invokeContract()
+						.functionName()
+						.toString()
+					if (method === "document")
+						return simulated(
+							xdr.ScVal.scvVec([
+								nativeToScVal(1, { type: "u64" }),
+								nativeToScVal(Buffer.from(doc)),
+							]),
+						)
+					if (method === "installed_rules")
+						return simulated(
+							nativeToScVal(
+								[
+									{ id: 2, name: "play", target: app, policies: [] },
+									{
+										id: 3,
+										name: "spend",
+										target: sac,
+										policies: m6 ? [] : [policy],
+									},
+								].map(({ id, name, target, policies }) => ({
+									context_type: xdr.ScVal.scvVec([
+										xdr.ScVal.scvSymbol("CallContract"),
+										new Address(target).toScVal(),
+									]),
+									id: nativeToScVal(id, { type: "u32" }),
+									name,
+									policies: xdr.ScVal.scvVec(
+										policies.map((p) =>
+											nativeToScVal(
+												{ policy: new Address(p).toScVal() },
+												{ type: { policy: ["symbol", null] } },
+											),
+										),
+									),
+									signers: xdr.ScVal.scvVec([
+										xdr.ScVal.scvVec([
+											xdr.ScVal.scvSymbol("External"),
+											new Address(verifier).toScVal(),
+											nativeToScVal(Buffer.from(keyData, "hex")),
+										]),
+									]),
+									valid_until: nativeToScVal(1_720, { type: "u32" }),
+								})),
+								{ type: { id: ["symbol", null] } },
+							),
+						)
+					return original(tx, l, mode)
+				},
+			)
+			Object.assign(server, {
+				getLedgerEntries: vi.fn(async (...asked: xdr.LedgerKey[]) => {
+					keys.push(...asked)
+					return {
+						entries: [
+							{ val: { contractData: () => ({ val: m6 ? record : window }) } },
+						],
+					}
+				}),
+			})
+			// A losing guess: `guess` on the game, then 1 XLM to the game
+			const me = new Address(account).toScVal()
+			const fn = (
+				contract: string,
+				name: string,
+				args: xdr.ScVal[],
+				subs: xdr.SorobanAuthorizedInvocation[] = [],
+			) =>
+				new xdr.SorobanAuthorizedInvocation({
+					function:
+						xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(
+							new xdr.InvokeContractArgs({
+								contractAddress: new Address(contract).toScAddress(),
+								functionName: name,
+								args,
+							}),
+						),
+					subInvocations: subs,
+				})
+			const entry = new xdr.SorobanAuthorizationEntry({
+				credentials: recorded.credentials(),
+				rootInvocation: fn(
+					app,
+					"guess",
+					[nativeToScVal(3, { type: "u64" }), me],
+					[
+						fn(sac, "transfer", [
+							me,
+							new Address(app).toScVal(),
+							nativeToScVal(10_000_000n, { type: "i128" }),
+						]),
+					],
+				),
+			})
+			const guessing = {
+				...assembled,
+				built: new TransactionBuilder(
+					new Account(StrKey.encodeEd25519PublicKey(Buffer.alloc(32)), "0"),
+					{
+						fee: "100",
+						networkPassphrase: Networks.TESTNET,
+					},
+				)
+					.addOperation(Operation.invokeHostFunction({ func, auth: [entry] }))
+					.setTimeout(30)
+					.build(),
+			} as unknown as contract.AssembledTransaction<boolean>
+			store([
+				{ ...play, expiresAt: Date.now() + hour },
+				{ ...spend, expiresAt: Date.now() + hour },
+			])
+			const session = loadSession(account)!
+			const submit = () =>
+				submitWithSession(guessing, loadSession(account)!, {
+					server,
+					networkPassphrase: Networks.TESTNET,
+					relayer: "https://relay",
+				})
+
+			const refusal = await submit().catch((e: unknown) => e)
+			expect(refusal).toBeInstanceOf(CapReachedError)
+			expect(isOverCap(refusal)).toBe(true)
+			expect(get).not.toHaveBeenCalled()
+			expect(relayed).toHaveLength(0)
+			// The cap's own record: the policy's, keyed by account and the XLM
+			// rule's id, or the M6 account's own, keyed by the rule's id
+			const [key] = keys.map((k) => k.contractData())
+			expect(Address.fromScAddress(key!.contract()).toString()).toBe(
+				m6 ? account : policy,
+			)
+			expect(scValToNative(key!.key())).toEqual(
+				m6 ? ["SpendRecords", 3] : ["AccountContext", account, 3],
+			)
+			// Free again once the 900 spend is a day old: 17,180 ledgers from 1,000
+			const until = (refusal as CapReachedError).until!
+			expect(Math.round((until - Date.now()) / 60_000)).toBe(
+				Math.round((17_180 * 5) / 60),
+			)
+			expect(capReachedUntil(account, [play, spend])).toBe(until)
+			expect(capReachedUntil(account, [play])).toBeUndefined()
+
+			// A guess that fits clears it
+			spent = []
+			await submit()
+			expect(get).toHaveBeenCalledOnce()
+			expect(capReachedUntil(account, [spend])).toBeUndefined()
+			expect(session.passkey).toEqual(passkey)
+		},
+	)
 	it("forgets a spent cap once its grant is approved again", () => {
 		store([{ ...spend }], { capped: { spend: Date.now() + hour } })
 		localStorage.setItem(pending, account)
@@ -1198,5 +1483,14 @@ describe("describing errors", () => {
 			explain("Error(Auth, InvalidAction) Error(Contract, #4)", errors),
 		).not.toMatch(/Already claimed/)
 		expect(explain("Error(Contract, #9)", errors)).toBe("Error(Contract, #9)")
+	})
+	it("maps an M6 account's rule-eval refusal, not a contract's own #5", () => {
+		const errors = { 5: "Sold out" }
+		const refused =
+			'HostError: Error(Auth, InvalidAction)\nEvent log (newest first):\n   0: [Diagnostic Event] topics:[error, Error(Contract, #5)], data:["contract call failed", __check_auth, [...]]'
+		expect(explain(refused, errors)).toMatch(/Your account refused/)
+		expect(explain("HostError: Error(Contract, #5)", errors)).toMatch(
+			/Sold out/,
+		)
 	})
 })
