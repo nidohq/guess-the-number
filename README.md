@@ -15,19 +15,18 @@ Testnet only.
 > **This branch is a preview, not for merging.** It points the app at Nido's
 > preview wallet https://356.test.nido.fyi
 > ([nidohq/nido#356](https://github.com/nidohq/nido/pull/356)), which runs the
-> M6 Perch stack as a separate testnet deployment (Nido factory
-> `CANGJ2QV5YGKNCXFI2ZCNJ3FCE2Y255X4UZWQCMHTDVA3RRUJ2NXVCR5`). Like that wallet,
+> M7 Perch stack as a separate testnet deployment (Nido factory
+> `CC32RVTK6YS4ZPJ6JDHLO5LMFILW2BPS3SAYX5TABN4GJJY5QXNMCMU4`). Like that wallet,
 > it sends no transaction through Nido's relayer: session calls go out from a
 > key the browser keeps, funded by testnet Friendbot. The game contract is the
 > same pinned deployment. The live site still runs `main`; run this branch
 > locally (below), and create its Nido account on the preview, in the same
 > browser: an invitation link, or
 > `https://356.test.nido.fyi/new-account/?setup=1#salt=<64 hex>` (for example
-> from `openssl rand -hex 32`). The preview keeps each app's rules in a scoped
-> document for the app's origin, and the app reads them there first. An account
-> that approved this app before the preview did that must reconnect once, so its
-> game rules move into the scope: press "Forget it" under the game, then make
-> the app's passkey and approve with Nido again.
+> from `openssl rand -hex 32`). The preview keeps each app's rules in a scope
+> for the app's origin, and the app reads them there first: the rules the
+> account enforces (`scope_rule_set`), since an M7 account keeps no scoped
+> document text.
 
 > Until 2026-10-24 the site used Nido's preview of
 > [nidohq/nido#318](https://github.com/nidohq/nido/pull/318); it now uses

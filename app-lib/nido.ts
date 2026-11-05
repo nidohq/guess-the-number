@@ -16,7 +16,7 @@ import { type SubmitStage } from "./session"
 export const isSmartAccount = StrKey.isValidContract
 
 /** The Nido wallet this branch plays against: the preview of nidohq/nido#356,
- * on the separate M6 testnet deployment. Apps override it with
+ * on the separate M7 testnet deployment. Apps override it with
  * `PUBLIC_NIDO_BASE`. */
 export const NIDO_BASE = "https://356.test.nido.fyi"
 

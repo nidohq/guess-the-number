@@ -3,7 +3,7 @@
 // and fee payer of each signed session call, which goes straight to RPC.
 //
 // It matches the Nido preview wallet this branch points at, which runs a
-// separate testnet deployment (the M6 Perch stack) without Nido's shared
+// separate testnet deployment (the M7 Perch stack) without Nido's shared
 // relayer and submits its own transactions the same way. Testnet only:
 // Friendbot has no mainnet equivalent. The key can pay fees and nothing
 // else: the account's rules name the app's passkey, not this key.

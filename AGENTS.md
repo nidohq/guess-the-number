@@ -129,16 +129,17 @@ export const MyAction = () => {
   visible but disabled. Several gates share one passkey; each asks only for what
   it lacks, all of it in one Nido popup and one confirmation.
 - `describe(error, contractErrors)`: #3221 over the cap, #3002/#3016 no rule or
-  expired, #3014 an uncovered contract in the tree, an M6 account's #5 from
-  `__check_auth` (any of those), Nido relayer codes, and your contract's
+  expired, #3014 an uncovered contract in the tree, an M6 or M7 account's #5
+  from `__check_auth` (any of those), Nido relayer codes, and your contract's
   `Error(Contract, #n)`.
 - `isOverCap(error)`: the #3221 refusal, for a message that names your cap. A
   call over a cap stops before the passkey prompt (`CapReachedError`, `until`);
   `capReachedUntil(address, grants)` says until when, to keep a button off.
-- Rules are picked per call by contract and function, from the scoped document
-  Nido keeps for the app's origin (`scope(id)`, `scope_doc(id)`; ids derived
-  from the origin) and then the account's `document()`, preferring this app's
-  grant labels over other rules on the same contract.
+- Rules are picked per call by contract and function, from the scope Nido keeps
+  for the app's origin (`scope(id)`, `scope_signer_ids(id)`,
+  `scope_rule_set(id)`; ids derived from the origin) and then the account's
+  `document()`, preferring this app's grant labels over other rules on the same
+  contract.
 - `isSmartAccount(address)` tells a C-address from a G-address.
 
 ## Smart accounts (C-addresses): what works
@@ -168,7 +169,7 @@ contract, #3014 for several). An app acts for a Nido account through a session.
   browser keeps only its public key and credential id: nothing there can spend.
   Each session call asks the device once; a key this browser keeps, funded by
   testnet Friendbot, submits it and pays the fee (`app-lib/localSubmitter.ts`),
-  as the M6 preview wallet does for its own transactions. Origins include the
+  as the M7 preview wallet does for its own transactions. Origins include the
   port, so a moved dev server has no session: keep `PORT` fixed. Browsers refuse
   passkeys on an IP, so open the app at `localhost`, not `127.0.0.1`.
 - Keep `from.require_auth()` at the top of the function that moves the user's
@@ -180,7 +181,7 @@ contract, #3014 for several). An app acts for a Nido account through a session.
 
 ## When Nido's relayer refuses
 
-The M6 preview wallet this branch uses (https://356.test.nido.fyi) and this
+The M7 preview wallet this branch uses (https://356.test.nido.fyi) and this
 app's session calls (`PUBLIC_NIDO_LOCAL_SUBMITTER=1`) never call the relayer:
 Friendbot-funded keys in the browser pay instead. Elsewhere, account creation
 and grants go through Nido's relayer, which has one shared testnet budget (100

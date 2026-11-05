@@ -692,47 +692,59 @@ describe("an app's scoped document", () => {
 		)
 	})
 
+	/** A rule-eval rule as `scope_rule_set` stores it: `guess` on the game,
+	 * or a `transfer` of the token capped at `limit` and paying only the
+	 * game. */
+	const stored = (limit?: bigint) =>
+		nativeToScVal({
+			cap: xdr.ScVal.scvVec(
+				limit === undefined
+					? []
+					: [
+							nativeToScVal({
+								amount_arg: nativeToScVal(2, { type: "u32" }),
+								limit: nativeToScVal(limit, { type: "i128" }),
+								period: nativeToScVal(17_280, { type: "u32" }),
+							}),
+						],
+			),
+			conds: xdr.ScVal.scvVec(
+				limit === undefined
+					? []
+					: [
+							xdr.ScVal.scvVec([
+								xdr.ScVal.scvSymbol("ArgEq"),
+								xdr.ScVal.scvU32(1),
+								xdr.ScVal.scvVec([
+									xdr.ScVal.scvSymbol("Address"),
+									new Address(app).toScVal(),
+								]),
+							]),
+							xdr.ScVal.scvVec([
+								xdr.ScVal.scvSymbol("ArgI128AtMost"),
+								xdr.ScVal.scvU32(2),
+								nativeToScVal((1n << 127n) - 1n, { type: "i128" }),
+							]),
+						],
+			),
+			contract: new Address(limit === undefined ? app : sac).toScVal(),
+			functions: xdr.ScVal.scvVec([
+				xdr.ScVal.scvSymbol("Only"),
+				xdr.ScVal.scvVec([
+					xdr.ScVal.scvSymbol(limit === undefined ? "guess" : "transfer"),
+				]),
+			]),
+		})
+
 	/** An account whose candidate 0 holds `first`'s scope and candidate 1
-	 * holds `second`'s, each with a `guess` rule (OZ ids 7 and 8), beside an
-	 * older `guess` rule in the admin document (id 2). */
+	 * holds `second`'s, each with a `guess` rule and a capped `pay` rule (OZ
+	 * ids 7 and 8, then 9 and 10), beside an older `guess` rule in the admin
+	 * document (id 2). */
 	const scopedAccount = (first: string, second: string, gen = 1n) => {
-		const rule = (id: number) =>
-			nativeToScVal(
-				{
-					context_type: xdr.ScVal.scvVec([
-						xdr.ScVal.scvSymbol("CallContract"),
-						new Address(app).toScVal(),
-					]),
-					id: nativeToScVal(id, { type: "u32" }),
-					name: "guess",
-					policies: xdr.ScVal.scvVec([]),
-					signers: xdr.ScVal.scvVec([
-						xdr.ScVal.scvVec([
-							xdr.ScVal.scvSymbol("External"),
-							new Address(verifier).toScVal(),
-							nativeToScVal(Buffer.from(keyData, "hex")),
-						]),
-					]),
-					valid_until: nativeToScVal(1_720, { type: "u32" }),
-				},
-				{ type: { id: ["symbol", null] } },
-			)
 		const scopes = new Map(
 			[first, second].map((o, i) => [
 				scopeId(origin, i),
-				{
-					ruleId: 7 + i,
-					doc: JSON.stringify({
-						signers: [{ id: `${o}#0123abcd` }],
-						rules: [
-							{
-								name: "guess",
-								functions: ["guess"],
-								scope: { type: "contract", address: app },
-							},
-						],
-					}),
-				},
+				{ signer: `${o}#0123abcd`, ruleIds: [7 + 2 * i, 8 + 2 * i] },
 			]),
 		)
 		const arg = (tx: { operations: Operation.InvokeHostFunction[] }) =>
@@ -760,30 +772,39 @@ describe("an app's scoped document", () => {
 											{
 												doc_hash: nativeToScVal(Buffer.alloc(32)),
 												gen: nativeToScVal(1n, { type: "u64" }),
-												rules: xdr.ScVal.scvVec([
-													nativeToScVal(
-														{
-															id: nativeToScVal(scope()!.ruleId, {
-																type: "u32",
-															}),
-															name: "guess",
-														},
-														{ type: { id: ["symbol", null] } },
-													),
+												rules: installed([
+													{
+														id: scope()!.ruleIds[0]!,
+														name: "guess",
+														contract: app,
+														key: keyData,
+													},
+													{
+														id: scope()!.ruleIds[1]!,
+														name: "pay",
+														contract: sac,
+														key: keyData,
+													},
 												]),
 											},
 											{ type: { doc_hash: ["symbol", null] } },
 										)
 									: xdr.ScVal.scvVoid(),
 							)
-						case "scope_doc":
+						case "scope_signer_ids":
 							return simulated(
 								scope()
-									? nativeToScVal(Buffer.from(scope()!.doc))
+									? nativeToScVal([scope()!.signer], {
+											type: ["string"],
+										})
 									: xdr.ScVal.scvVoid(),
 							)
-						case "get_context_rule":
-							return simulated(rule(arg(tx)!.u32()))
+						case "scope_rule_set":
+							return simulated(
+								xdr.ScVal.scvVec(
+									scope() ? [stored(), stored(2n * 10n ** 7n)] : [],
+								),
+							)
 						default:
 							return { latestLedger: 1_000, error: "no document" }
 					}
@@ -796,10 +817,17 @@ describe("an app's scoped document", () => {
 		const server = scopedAccount("https://other.example", origin)
 		const { rules } = await readRules(account, server, Networks.TESTNET, origin)
 		expect(rules.map((r) => [r.id, r.name, r.functions])).toEqual([
-			[8, "guess", ["guess"]],
+			[9, "guess", ["guess"]],
+			[10, "pay", ["transfer"]],
 			[2, "guess", undefined],
 		])
 		expect(rules[0]).toMatchObject({ contract: app, policies: [] })
+		// The cap and the one recipient come from the rule the account enforces
+		expect(rules[1]).toMatchObject({
+			contract: sac,
+			cap: { limit: 2n * 10n ** 7n, periodLedgers: 17_280 },
+			to: app,
+		})
 		// The scope's rule wins over the admin document's of the same name
 		expect(
 			ruleIdsFor(
@@ -809,7 +837,7 @@ describe("an app's scoped document", () => {
 				1_000,
 				["guess"],
 			),
-		).toEqual([8])
+		).toEqual([9])
 	})
 	it("leaves out a scope a recovery wiped, and works without an origin", async () => {
 		const wiped = scopedAccount(origin, "https://other.example", 2n)

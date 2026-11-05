@@ -872,9 +872,7 @@ type NativeRule = {
 	name: string
 	context_type: unknown
 	signers: unknown[]
-	/** `installed_rules()` gives `{ policy }` records, `get_context_rule()`
-	 * the addresses alone. */
-	policies?: ({ policy: string } | string)[]
+	policies?: { policy: string }[]
 	valid_until?: number | null
 }
 
@@ -930,9 +928,7 @@ export function parseRules(
 					}
 				: {}),
 			...(to ? { to } : {}),
-			policies: (rule.policies ?? []).map((p) =>
-				typeof p === "string" ? p : String(p.policy),
-			),
+			policies: (rule.policies ?? []).map((p) => String(p.policy)),
 			external: signers.flatMap((s) =>
 				s?.[0] === "External"
 					? [{ verifier: String(s[1]), key: toHex(s[2] as Uint8Array) }]
@@ -1038,13 +1034,65 @@ export async function appScopeCandidates(origin: string): Promise<number[]> {
 	)
 }
 
+/** A rule-eval rule as `scope_rule_set(id)` gives it (`scValToNative`
+ * form): what `__check_auth` enforces for one rule of a scoped document. */
+type StoredRule = {
+	contract: string
+	/** `Only(names)` or `AnyExcept(names)`. */
+	functions: unknown
+	/** `ArgEq(index, value)`, `ArgI128AtMost(index, bound)`, … */
+	conds: unknown[]
+	/** Zero or one cap. */
+	cap: { limit: bigint; period: number }[]
+}
+
+/** The document rule `stored` enforces, in the parts this app reads: its
+ * functions, its cap, and the `address-eq` on a transfer's `to`. */
+function storedDocRule(name: string, stored: StoredRule): DocRule {
+	const [kind, names] = variant(stored.functions) ?? []
+	const listed = Array.isArray(names) ? names.map(String) : []
+	const to = stored.conds
+		.map(variant)
+		.find((c) => c?.[0] === "ArgEq" && Number(c[1]) === 1)
+	const address = variant(to?.[2])
+	const cap = stored.cap[0]
+	return {
+		name,
+		scope: { type: "contract", address: String(stored.contract) },
+		// `AnyExcept([])` is every function; a scoped document has no other
+		// `AnyExcept`, so one that names functions is left uncallable here
+		functions: kind === "Only" ? listed : listed.length ? [] : undefined,
+		...(address?.[0] === "Address"
+			? {
+					args: [
+						{
+							index: 1,
+							pred: { type: "address-eq", address: String(address[1]) },
+						},
+					],
+				}
+			: {}),
+		...(cap
+			? {
+					cap: {
+						limit: String(cap.limit),
+						"period-ledgers": Number(cap.period),
+					},
+				}
+			: {}),
+	}
+}
+
 /**
  * The rules of `origin`'s scoped document on a Perch account that keeps
- * them (the M6 stack, `apply_scope`): the first candidate scope whose every
- * signer id is `<origin>#<8 hex>`. Its rules are installed with OZ ids that
- * `scope(id)` lists, apart from `installed_rules`. None when the account
- * keeps no scopes, no candidate is the origin's, or a recovery has wiped
- * it (its rules authorize nothing).
+ * them (`apply_scope`, the M7 stack): the first candidate scope whose every
+ * signer id (`scope_signer_ids(id)`) is `<origin>#<8 hex>`. `scope(id)`
+ * gives its installed rules, apart from `installed_rules`, and
+ * `scope_rule_set(id)`, aligned with them, the rule-eval rules the account
+ * enforces for them: their functions, caps and recipients. The account
+ * keeps no document text. None when the account keeps no scopes, no
+ * candidate is the origin's, or a recovery has wiped it (its rules
+ * authorize nothing).
  */
 async function readScopedRules(
 	account: string,
@@ -1062,28 +1110,23 @@ async function readScopedRules(
 		/^[0-9a-f]{8}$/.test(signer.slice(o.length + 1))
 	for (const id of await appScopeCandidates(origin)) {
 		const scope = [xdr.ScVal.scvU32(id)]
-		const record = (await call("scope", scope)) as {
-			gen: bigint
-			rules: { id: number; name: string }[]
-		} | null
-		if (!record) continue
-		const bytes = await call("scope_doc", scope)
-		if (!(bytes instanceof Uint8Array)) continue
-		const doc = JSON.parse(new TextDecoder().decode(bytes)) as {
-			rules: DocRule[]
-			signers?: { id: string }[]
-		}
-		if (!doc.signers?.length || !doc.signers.every((s) => own(s.id))) continue
+		const [record, signerIds, ruleSet] = (await Promise.all([
+			call("scope", scope),
+			call("scope_signer_ids", scope),
+			call("scope_rule_set", scope),
+		])) as [
+			{ gen: bigint; rules: NativeRule[] } | null,
+			string[] | null,
+			StoredRule[],
+		]
+		if (!record || !signerIds?.length) continue
+		if (!signerIds.every((s) => own(String(s)))) continue
 		if (BigInt(record.gen) !== BigInt(generation as bigint)) return []
-		const native = await Promise.all(
-			record.rules.map(
-				(r) =>
-					call("get_context_rule", [
-						xdr.ScVal.scvU32(Number(r.id)),
-					]) as Promise<NativeRule>,
+		return parseRules(record.rules, {
+			rules: record.rules.flatMap((rule, i) =>
+				ruleSet[i] ? [storedDocRule(String(rule.name), ruleSet[i])] : [],
 			),
-		)
-		return parseRules(native, doc)
+		})
 	}
 	return []
 }
@@ -1097,8 +1140,9 @@ export interface CapWindow {
 
 /** The spending window of `rule`'s cap on `account`, read from its policy's
  * storage (`AccountContext(account, rule id)`); `undefined` before the first
- * spend. A Perch account on rule-eval (the M6 stack) attaches no policy to a
- * document rule and keeps the window itself (`readOwnCapWindow`). */
+ * spend. A Perch account on rule-eval (the M6 and M7 stacks) attaches no
+ * policy to a document rule and keeps the window itself
+ * (`readOwnCapWindow`). */
 async function readCapWindow(
 	account: string,
 	rule: InstalledRule,
@@ -1138,9 +1182,9 @@ async function readCapWindow(
 	}
 }
 
-/** The spending window an M6 account keeps for a capped rule in its own
- * storage (`SpendRecords(rule id)`: the spends still in the window), with
- * the cap from its policy document. */
+/** The spending window an M6 or M7 account keeps for a capped rule in its
+ * own storage (`SpendRecords(rule id)`: the spends still in the window),
+ * with the rule's cap. */
 async function readOwnCapWindow(
 	account: string,
 	rule: InstalledRule,
@@ -1269,9 +1313,10 @@ export function isOverCap(error: unknown): boolean {
 	return message.includes("#3221") || message.includes(OVER_CAP)
 }
 
-/** A Perch account on rule-eval (the M6 stack) refuses an authorization its
- * rules don't allow with its own `RuleEvalRefused`, #5, where OZ answered
- * #3002, #3014 or #3221: over a cap, no covering rule, or an expired one. */
+/** A Perch account on rule-eval (the M6 and M7 stacks) refuses an
+ * authorization its rules don't allow with its own `RuleEvalRefused`, #5,
+ * where OZ answered #3002, #3014 or #3221: over a cap, no covering rule, or
+ * an expired one. */
 const RULE_EVAL_REFUSED =
 	/Error\(Contract, #5\)[\s\S]*__check_auth|__check_auth[\s\S]*Error\(Contract, #5\)/
 

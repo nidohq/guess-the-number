@@ -47,7 +47,7 @@ deployment. To try the sample in the checkout itself, run the same commands from
 
 Then open the app at `http://localhost:<PORT>` (passkeys need a host name, so
 not `127.0.0.1`), press Connect and choose Nido. Without a Nido account yet,
-create one at https://356.test.nido.fyi, the M6 preview wallet this branch uses
+create one at https://356.test.nido.fyi, the M7 preview wallet this branch uses
 (an invitation link, or `/new-account/?setup=1#salt=<64 hex>`): one passkey, and
 Friendbot funds it. Back in the app, your device makes a passkey for the app,
 and Nido asks you once, in a popup, to approve what that passkey may do. After
@@ -176,8 +176,8 @@ Everything here comes from `@stellar-scaffold/app-lib` (the template's
   buttons and inputs wait.
 - `describe(error, contractErrors)` turns failures into sentences: the account's
   refusals (#3221 over the cap; #3002 or #3016 no rule covers the call, or it
-  expired; #3014 a contract in the call has no rule; an M6 account answers any
-  of those with #5 from `__check_auth`), Nido's relayer codes, and your
+  expired; #3014 a contract in the call has no rule; an M6 or M7 account answers
+  any of those with #5 from `__check_auth`), Nido's relayer codes, and your
   contract's `Error(Contract, #n)` looked up in `contractErrors` (the generated
   client's `Errors`, or your own table).
 - `isOverCap(error)` is true when a call was refused for going over a grant's
@@ -206,7 +206,7 @@ passkey:
    in a popup, with every grant the screen needs and the app's public key
    (`pubkey=`). Nido shows each rule, the owner confirms once with their own
    passkey, and Nido applies the app's rules in a scoped document for the app's
-   origin (`apply_scope`); the M6 preview submits it from a Friendbot-funded key
+   origin (`apply_scope`); the M7 preview submits it from a Friendbot-funded key
    in the wallet's origin. The rules name the app's passkey as an `External`
    signer, checked by the same WebAuthn verifier as the owner's.
 3. For each later call the app asks the device to sign the account's auth entry
@@ -279,7 +279,7 @@ Some patterns that work:
 
 ## When Nido's relayer says no
 
-The M6 preview wallet this branch uses (https://356.test.nido.fyi) and this
+The M7 preview wallet this branch uses (https://356.test.nido.fyi) and this
 app's session calls (`PUBLIC_NIDO_LOCAL_SUBMITTER=1`) never call the relayer:
 Friendbot-funded keys in the browser pay instead. Elsewhere, Nido's relayer pays
 for creating accounts, applying grants and submitting session calls, out of one
