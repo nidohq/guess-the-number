@@ -47,6 +47,7 @@ impl GuessTheNumber {
 
     /// Guess a number between 1 and 10
     pub fn guess(env: &Env, a_number: u64, guesser: Address) -> Result<bool, Error> {
+        guesser.require_auth();
         let xlm_client = xlm::token_client(env);
         let contract_address = env.current_contract_address();
         let guessed_it = a_number == Self::number(env);
@@ -61,7 +62,6 @@ impl GuessTheNumber {
                 .try_transfer(&contract_address, &guesser, &balance)
                 .map_err(|_| Error::FailedToTransferToGuesser)?;
         } else {
-            guesser.require_auth();
             let _ = xlm_client
                 .try_transfer(&guesser, &contract_address, &xlm::to_stroops(1))
                 .map_err(|_| Error::FailedToTransferFromGuesser)?;

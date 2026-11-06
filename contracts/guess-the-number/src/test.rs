@@ -4,9 +4,9 @@ extern crate std;
 
 use super::*;
 use soroban_sdk::{
-    testutils::{Address as _, MockAuth, MockAuthInvoke},
-    token::StellarAssetClient,
     Address, Env, IntoVal, Val, Vec,
+    testutils::{Address as _, AuthorizedFunction, AuthorizedInvocation, MockAuth, MockAuthInvoke},
+    token::StellarAssetClient,
 };
 
 fn init_test<'a>(env: &'a Env) -> (Address, StellarAssetClient<'a>, GuessTheNumberClient<'a>) {
@@ -155,4 +155,127 @@ where
         address: &caller,
         invoke,
     }]);
+}
+
+// Fix the secret explicitly so these cases do not depend on the PRNG sequence.
+fn auth_fixture<'a>(env: &'a Env) -> (StellarAssetClient<'a>, GuessTheNumberClient<'a>, Address) {
+    let (admin, sac, client) = init_test(env);
+    env.as_contract(&client.address, || {
+        env.storage().instance().set(THE_NUMBER, &7u64)
+    });
+    let guesser = Address::generate(env);
+    env.mock_auths(&[MockAuth {
+        address: &admin,
+        invoke: &MockAuthInvoke {
+            contract: &sac.address,
+            fn_name: "mint",
+            args: (guesser.clone(), xlm::to_stroops(2)).into_val(env),
+            sub_invokes: &[],
+        },
+    }]);
+    sac.mint(&guesser, &xlm::to_stroops(2));
+    env.set_auths(&[]);
+    (sac, client, guesser)
+}
+
+fn assert_guess_requires_auth(number: u64) {
+    // Missing auth and an exact invocation signed by someone else must both fail.
+    for wrong_signer in [false, true] {
+        let env = &Env::default();
+        let (sac, client, guesser) = auth_fixture(env);
+        if wrong_signer {
+            set_caller(
+                &client,
+                "guess",
+                &Address::generate(env),
+                (number, guesser.clone()),
+            );
+        }
+        assert!(client.try_guess(&number, &guesser).is_err());
+        assert_eq!(sac.balance(&guesser), xlm::to_stroops(2));
+        assert_eq!(sac.balance(&client.address), xlm::to_stroops(1));
+    }
+}
+
+#[test]
+fn winning_guess_requires_guesser_auth() {
+    assert_guess_requires_auth(7);
+}
+
+#[test]
+fn losing_guess_requires_guesser_auth() {
+    assert_guess_requires_auth(6);
+}
+
+fn assert_authorized_guess(wins: bool) {
+    let env = &Env::default();
+    let (sac, client, guesser) = auth_fixture(env);
+    let number = if wins { 7u64 } else { 6u64 };
+    let args = (number, guesser.clone()).into_val(env);
+    let transfer_args = (guesser.clone(), client.address.clone(), xlm::to_stroops(1)).into_val(env);
+    let transfer = MockAuthInvoke {
+        contract: &sac.address,
+        fn_name: "transfer",
+        args: transfer_args,
+        sub_invokes: &[],
+    };
+    env.mock_auths(&[MockAuth {
+        address: &guesser,
+        invoke: &MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "guess",
+            args,
+            sub_invokes: if wins {
+                &[]
+            } else {
+                std::slice::from_ref(&transfer)
+            },
+        },
+    }]);
+    assert_eq!(client.guess(&number, &guesser), wins);
+    // Read immediately: subsequent balance calls replace the recorded invocation.
+    assert_eq!(
+        env.auths(),
+        std::vec![(
+            guesser.clone(),
+            AuthorizedInvocation {
+                function: AuthorizedFunction::Contract((
+                    client.address.clone(),
+                    Symbol::new(env, "guess"),
+                    (number, guesser.clone()).into_val(env)
+                )),
+                sub_invocations: if wins {
+                    std::vec![]
+                } else {
+                    std::vec![AuthorizedInvocation {
+                        function: AuthorizedFunction::Contract((
+                            sac.address.clone(),
+                            Symbol::new(env, "transfer"),
+                            (guesser.clone(), client.address.clone(), xlm::to_stroops(1))
+                                .into_val(env)
+                        )),
+                        sub_invocations: std::vec![],
+                    }]
+                },
+            }
+        )]
+    );
+    assert_eq!(
+        sac.balance(&guesser),
+        xlm::to_stroops(if wins { 3 } else { 1 })
+    );
+    assert_eq!(
+        sac.balance(&client.address),
+        xlm::to_stroops(if wins { 0 } else { 2 })
+    );
+}
+
+#[test]
+fn authorized_win_pays_guesser_with_guess_root() {
+    assert_authorized_guess(true);
+}
+
+#[test]
+fn authorized_loss_charges_one_xlm_under_guess_root() {
+    assert_authorized_guess(false);
 }
