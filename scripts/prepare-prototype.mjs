@@ -13,6 +13,7 @@ import { resolve } from "node:path"
 import { parse } from "yaml"
 import { root } from "./tools.mjs"
 
+const mainnet = process.argv.includes("--mainnet")
 const PLACEHOLDER = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4"
 const targetDir = resolve(root, "target", "prototype")
 const run = (command, args, options = {}) =>
@@ -72,8 +73,8 @@ writeFileSync(
 	`// LOCAL PROTOTYPE ONLY: generated from WASM, not a deployed contract.
 ${crates.map(({ name }) => `import { Client as ${pascal(name)} } from "./${name}/dist/index.js"`).join("\n")}
 export const options = {
-  networkPassphrase: "Test SDF Network ; September 2015",
-  rpcUrl: "https://soroban-testnet.stellar.org",
+  networkPassphrase: "${mainnet ? "Public Global Stellar Network ; September 2015" : "Test SDF Network ; September 2015"}",
+  rpcUrl: "${mainnet ? "https://mainnet.sorobanrpc.com" : "https://soroban-testnet.stellar.org"}",
   allowHttp: false,
   publicKey: undefined,
 }

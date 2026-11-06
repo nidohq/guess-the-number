@@ -72,3 +72,25 @@
 .footerNav a:hover {
 	color: var(--color-text);
 }
+
+@media (max-width: 640px) {
+	.header {
+		padding: 1rem;
+		gap: 1rem;
+		flex-wrap: wrap;
+	}
+	.headerNav {
+		order: 3;
+		flex-basis: 100%;
+	}
+	.main {
+		padding: 1.25rem 1rem;
+	}
+	.footer {
+		padding: 1rem;
+	}
+	.footerNav {
+		justify-content: flex-start;
+		flex-wrap: wrap;
+	}
+}

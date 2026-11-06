@@ -21,7 +21,8 @@
     "link-clients": "node scripts/link-clients.mjs",
     "new-app": "node scripts/new-app.mjs",
     "prepare:prototype": "node scripts/prepare-prototype.mjs",
-    "preview:prototype": "npm exec --workspace app -- vite --host 127.0.0.1 --port 5180"
+    "preview:prototype": "npm exec --workspace app -- vite --host 127.0.0.1 --port 5180",
+    "clients:mainnet": "node scripts/clients-mainnet.mjs"
   },
   "workspaces": [
     "app",

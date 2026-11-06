@@ -6,8 +6,9 @@ passkey, made by the app, that the owner allows to make a few calls for a while.
 This is the guide for people. Coding agents read [`AGENTS.md`](AGENTS.md), which
 states the same rules in fewer words.
 
-Everything runs on testnet: hosted Nido is testnet-only. Use throwaway testnet
-keys only, never mainnet or a key a person holds.
+Testnet is the development default. Mainnet builds require a reviewed deployment
+via `npm run clients:mainnet`; use throwaway testnet keys for tests. Never
+transact on mainnet or use a person’s keys without explicit authorization.
 
 ## Quick start
 
@@ -369,17 +370,19 @@ pricing, 3.3 and 0.2 XLM, and the approval 44 XLM.
   accounts report `oz_rule_ids`); the unit tests pin it to Perch's auth vectors.
   `npm run link-clients` keeps generated clients on app-lib's copy of
   `@stellar/stellar-sdk`.
-- Session calls go to Nido's relayer at `https://nido.fly.dev`; set
-  `PUBLIC_NIDO_RELAYER` in `app/.env` for another. The grant request leaves out
-  `credential_id`: Perch's document compiler refuses a WebAuthn key with the id
-  appended (`#7`, `KeyNotCanonicalizable`).
+- Session calls use `https://nido.fly.dev` on testnet and
+  `https://nido-mainnet.fly.dev` on mainnet; set `PUBLIC_NIDO_RELAYER` in
+  `app/.env` for another deployment on the same network. The grant request
+  leaves out `credential_id`: Perch's document compiler refuses a WebAuthn key
+  with the id appended (`#7`, `KeyNotCanonicalizable`).
 - Nido's `ADD-NIDO-TO-DAPP.md` and module README still say the dApp submits the
   signed XDR; for transactions the wallet now submits and returns a hash, which
   the app must not broadcast again.
 - The adapter reports a configured passphrase; it can't discover the
-  deployment's actual network, so Nido is registered only on testnet. Other
-  networks keep the default wallet list. Friendbot creates classic accounts; the
-  Fund button is hidden for C-addresses.
+  deployment's actual network. Nido is registered on testnet and mainnet, with
+  separate wallet/relayer defaults and session storage. Other networks keep the
+  default wallet list. Friendbot creates classic accounts; the Fund button is
+  hidden for C-addresses.
 - This layout derives from the official React template at
   `stellar-scaffold/ui@505354435c43e8d7af19c84bcb198990e36f983b`, already in its
   final `app/`, `app-lib/`, `contracts/` shape.

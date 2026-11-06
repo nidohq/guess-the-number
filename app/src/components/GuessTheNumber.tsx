@@ -1,4 +1,6 @@
 import {
+	network,
+	transactionUrl,
 	CapReachedError,
 	capReachedUntil,
 	describe,
@@ -109,6 +111,19 @@ export const GuessTheNumber = () => {
 		setHash(undefined)
 	}
 
+	if (
+		network.id === "mainnet" &&
+		guessTheNumber.options.contractId ===
+			"CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4"
+	)
+		return (
+			<p role="status">
+				Mainnet rehearsal — no game deployment configured. Connecting a wallet
+				is available, but permission requests and guesses are disabled. No funds
+				are needed.
+			</p>
+		)
+
 	return (
 		<div className="guess-the-number">
 			<SessionGate
@@ -162,8 +177,8 @@ export const GuessTheNumber = () => {
 				{result === "success" && (
 					<div className="card guess-result guess-result--success">
 						<p>
-							You got it! Play again by calling <code>reset</code> in the
-							Contract Explorer.
+							You got it! The game paid you its XLM pot. Only the game admin can
+							reset the number and refill the pot.
 						</p>
 					</div>
 				)}
@@ -180,7 +195,10 @@ export const GuessTheNumber = () => {
 				)}
 				{hash && !stage && (
 					<p className="session-note">
-						Transaction <code>{hash}</code>
+						<a href={transactionUrl(hash)} target="_blank" rel="noreferrer">
+							View transaction
+						</a>{" "}
+						<code>{hash}</code>
 					</p>
 				)}
 			</SessionGate>
