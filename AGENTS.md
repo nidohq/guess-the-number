@@ -1,8 +1,10 @@
 # AGENTS.md
 
 A Scaffold Stellar React app with Nido passkey smart accounts in the wallet
-picker. Testnet only: hosted Nido runs on testnet, and so should you. Never use
-mainnet or a key a person holds; generate throwaway testnet keys.
+picker. Testnet is the development default; mainnet builds require a reviewed
+deployment via `npm run clients:mainnet`. Never transact on mainnet or use a
+person’s keys without explicit authorization; use throwaway testnet keys for
+tests.
 
 [`NIDO.md`](NIDO.md) is the same material for people, with more explanation:
 read it for the relayer failure modes and the patterns. This file and NIDO.md

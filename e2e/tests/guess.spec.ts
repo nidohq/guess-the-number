@@ -175,7 +175,12 @@ test("a Nido account approves the game's passkey once, then each guess asks only
 	expect(seen.filter((s) => order.includes(s))).toEqual(order)
 	expect(await prompts(page)).toBe(1)
 	expect(popups).toBe(0)
-	await expect(page.getByText(/^Transaction [0-9a-f]{64}$/)).toBeVisible()
+	await expect(
+		page.getByRole("link", { name: "View transaction" }),
+	).toHaveAttribute(
+		"href",
+		/^https:\/\/stellar\.expert\/explorer\/testnet\/tx\/[0-9a-f]{64}$/,
+	)
 
 	// Nido's relayer submits; the app sends no transaction of its own
 	expect(relayed).toHaveLength(1)

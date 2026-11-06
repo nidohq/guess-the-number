@@ -113,7 +113,17 @@ const networkToId = (network: StellarNetwork): NetworkType => {
 
 export const network: Network = {
 	id: networkToId(stellarNetwork),
-	label: stellarNetwork.toLowerCase(),
+	label:
+		stellarNetwork === "PUBLIC"
+			? "Mainnet"
+			: stellarNetwork === "TESTNET"
+				? "Testnet"
+				: stellarNetwork.toLowerCase(),
 	passphrase: networkPassphrase,
 	rpcUrl: rpcUrl,
 }
+
+export const transactionUrl = (hash: string) =>
+	stellarNetwork === "PUBLIC" || stellarNetwork === "TESTNET"
+		? `https://stellar.expert/explorer/${stellarNetwork === "PUBLIC" ? "public" : "testnet"}/tx/${encodeURIComponent(hash)}`
+		: labPrefix()

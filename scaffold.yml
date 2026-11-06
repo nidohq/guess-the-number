@@ -38,12 +38,9 @@ networks:
     extends: testnet
     allow-deploy: true
 
-  # mainnet:
-  #   # stellar-cli has no default mainnet RPC; bring your own
-  #   rpc-url: https://your-rpc-provider.example
-  #   rpc-headers:
-  #     Authorization: "Bearer ${env.MAINNET_RPC_TOKEN}"
-  #   accounts: [mainnet-user]
+  mainnet:
+    rpc-url: https://mainnet.sorobanrpc.com
+    accounts: []
 
 # Contracts to build, deploy, and generate clients for. Keys directly under a
 # contract are defaults for every network it lists; entries under `networks:`
@@ -74,9 +71,7 @@ contracts:
         args:
           admin: ${account.testnet-user}
         after-deploy: [reset]
-      # mainnet:
-      #   type: contract
-      #   source: C...
+      # clients:mainnet adds a verified mainnet contract entry here.
 
   fungible-allowlist:
     networks:

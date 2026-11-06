@@ -9,8 +9,8 @@ and published as it comes. People sign in with a passkey: a
 makes a second passkey of its own, and the player approves it once, in one Nido
 popup, to call `guess` and to pay the game up to 2 XLM a day. Each guess then
 takes one device passkey prompt and no Nido page. A wrong guess costs 1 XLM, so
-two go through and the account refuses the third before anything is sent.
-Testnet only.
+two go through and the account refuses the third before anything is sent. The
+published site remains testnet; this source also supports a mainnet build.
 
 > Until 2026-10-24 the site used Nido's preview of
 > [nidohq/nido#318](https://github.com/nidohq/nido/pull/318); it now uses
@@ -125,3 +125,49 @@ a throwaway identity on the CI job's local quickstart network.
 
 [License](LICENSE) · [Security](SECURITY.md) ·
 [Code of conduct](CODE_OF_CONDUCT.md)
+
+## Mainnet build and recording
+
+Network selection is **per build**, from generated clients. The page and header
+identify the selected network; there is no in-page switch. Mainnet uses
+`https://nido.fyi`, `https://nido-mainnet.fly.dev`, and
+`https://mainnet.sorobanrpc.com`. Testnet keeps its existing endpoints. Leave
+`PUBLIC_NIDO_BASE` and `PUBLIC_NIDO_RELAYER` unset unless intentionally
+overriding both for a deployment on the same network. Stale hosted testnet
+overrides are rejected. Session approvals are isolated by network.
+
+No mainnet game ID is shipped. Obtain a reviewed deployment of this contract
+(including unconditional guesser auth and mainnet XLM binding), with a funded
+pot, before building. Its admin must own the reset/refill workflow. The command
+pins the verified address under `mainnet:` in `scaffold.yml`. Client preflight
+verifies the RPC passphrase and live contract instance, **not** its code
+identity or funding; those must be reviewed separately.
+
+```sh
+# Existing deployment only: no keys, Friendbot, upload, or deploy.
+MAINNET_GAME_ID=<reviewed-contract-address> npm run clients:mainnet
+npm run build
+npm exec --workspace app -- vite preview --host localhost --port 5542
+```
+
+Do not run the default `npm run dev` after this command: its watcher follows
+`STELLAR_NETWORK` (testnet by default) and would regenerate testnet clients.
+Serve the build above, or explicitly use the mainnet network when regenerating.
+The Pages workflow still publishes testnet; publishing a mainnet build is a
+separate operator action.
+
+For a no-funds layout rehearsal (no usable deployment or permission requests):
+
+```sh
+npm run prepare:prototype -- --mainnet
+npm run build
+npm exec --workspace app -- vite preview --host localhost --port 5542
+```
+
+The page explicitly labels this as a rehearsal and disables guesses and grants.
+Use `npm run prepare:prototype` for the existing mocked testnet browser suite. A
+live recording requires a funded mainnet wallet and funded game: connect,
+approve `guess` plus XLM `transfer` restricted to the game (2 XLM/day, 24
+hours), then confirm a guess. A loss costs 1 XLM; a win pays the available pot.
+Show the result and **View transaction** link. Do not promise a win or ask a
+player to reset the game: reset is admin-only.
